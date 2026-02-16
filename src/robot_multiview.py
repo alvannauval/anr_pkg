@@ -110,54 +110,15 @@ def calculate_look_at_zyz(camera_pos, target_pos):
     rot_matrix = np.column_stack((x_axis, y_axis, z_axis))
     return R.from_matrix(rot_matrix).as_euler('zyz', degrees=True)
 
-
-def calculate_rotation_matrix(camera_pos, target_pos):
-    """
-    Creates a 3x3 rotation matrix for a 'Look-At' orientation.
-    The camera's Z-axis will point directly at the target.
-    """
-    # 1. Z-axis: The direction the camera is looking
-    z_axis = np.array(target_pos) - np.array(camera_pos)
-    z_axis /= (np.linalg.norm(z_axis) + 1e-6)
     
-    # 2. X-axis: Determine 'Right' 
-    # We use a temporary UP vector. If looking straight down, use [0,1,0]
-    temp_up = np.array([0, 0, 1])
-    if abs(np.dot(z_axis, temp_up)) > 0.99:
-        temp_up = np.array([0, 1, 0]) # Switch if looking parallel to Z
-        
-    x_axis = np.cross(temp_up, z_axis)
-    x_axis /= (np.linalg.norm(x_axis) + 1e-6)
-    
-    # 3. Y-axis: Determine 'Down' (or Up depending on camera convention)
-    y_axis = np.cross(z_axis, x_axis)
-    
-    # Assemble the 3x3 matrix
-    # Columns are x, y, z axes respectively
-    rot_matrix = np.column_stack((x_axis, y_axis, z_axis))
-    
-    return rot_matrix
-
-
-
-# def get_tf_matrix(tf_buffer, target='base_0', source='realsense_RGBframe'):
-#     """Fetches the 4x4 Homogeneous Transformation matrix from TF2 (in mm)."""
-#     try:
-#         t = tf_buffer.lookup_transform(target, source, rospy.Time(0), rospy.Duration(2.0))
-#         quat = [t.transform.rotation.x, t.transform.rotation.y, t.transform.rotation.z, t.transform.rotation.w]
-        
-#         tf_matrix = np.eye(4)
-#         tf_matrix[:3, :3] = R.from_quat(quat).as_matrix()
-#         tf_matrix[:3, 3] = np.array([t.transform.translation.x, t.transform.translation.y, t.transform.translation.z]) * 1000.0
-#         return tf_matrix
-#     except Exception as e:
-#         rospy.logerr(f"TF Lookup failed: {e}")
-#         return None
-    
-
 def capture_scan_view(pipeline, align, T_base_camera, index, save_dir="PCD_Data", duration=1.0):
-    """Captures multiple frames over a duration and merges them into one clean PCD."""    
-    all_points = [] # List to store points from every frame
+    """
+    Captures frames, merges PCD, and saves a side-by-side RGB+Depth visualization.
+    Normalization ensures the depth image isn't just a solid blue block.
+    """    
+    all_points = []
+    last_color_image = None
+    last_depth_data = None
     start_time = time.time()
     count = 0
     
@@ -165,56 +126,82 @@ def capture_scan_view(pipeline, align, T_base_camera, index, save_dir="PCD_Data"
 
     while (time.time() - start_time) < duration:
         count += 1
-        frame = pipeline.wait_for_frames()
-        aligned_frames = align.process(frame)
+        frames = pipeline.wait_for_frames()
+        aligned_frames = align.process(frames)
 
         depth_frame = aligned_frames.get_depth_frame()
-        last_depth_data = np.asanyarray(depth_frame.get_data())
-        if not depth_frame:
+        color_frame = aligned_frames.get_color_frame()
+        
+        if not depth_frame or not color_frame:
             continue
             
+        # Store for visualization (most recent frame)
+        last_depth_data = np.asanyarray(depth_frame.get_data())
+        last_color_image = np.asanyarray(color_frame.get_data())
+
+        # Logic to reduce point density: process every 5th frame
         if count % 5 != 0:
             continue 
 
-        # Calculate Points
+        # 1. Calculate Point Cloud
         pc = rs.pointcloud()
         points = pc.calculate(depth_frame)
+        # Convert to mm
         verts = np.asanyarray(points.get_vertices()).view(np.float32).reshape(-1, 3) * 1000.0
         
+        # 2. Transform to Base Frame
+        # T_base_camera must be the 4x4 matrix from important_2 logic
         verts_base = (T_base_camera @ np.c_[verts, np.ones(len(verts))].T).T[:, :3]
         all_points.append(verts_base)
 
     if len(all_points) == 0:
-        print("Error: No points captured!")
+        print("Error: No data captured!")
         return
 
-
-    print("\nCurrent Transformation Base - Camera")
-    print(T_base_camera)
-
-
-    merged_verts = np.vstack(all_points)
-
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(merged_verts)
-    pcd = pcd.voxel_down_sample(voxel_size=2.0)
-
+    # --- VISUALIZATION PROCESSING ---
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
+
+    # Prepare RGB (BGR for OpenCV)
+    color_bgr = cv2.cvtColor(last_color_image, cv2.COLOR_RGB2BGR)
+
+    # Prepare Normalized Depth (The "Blue Image" Fix)
+    depth_mask = last_depth_data > 0
+    if np.any(depth_mask):
+        d_min = np.min(last_depth_data[depth_mask])
+        d_max = np.max(last_depth_data[depth_mask])
+        
+        # Normalize to 0-255 range based on the distance of your object
+        depth_norm = (last_depth_data - d_min) / (d_max - d_min + 1e-6)
+        depth_8bit = (depth_norm * 255).astype(np.uint8)
+        depth_viz = cv2.applyColorMap(depth_8bit, cv2.COLORMAP_JET)
+        
+        # Make invalid/reflective holes pure black
+        depth_viz[~depth_mask] = [0, 0, 0]
+    else:
+        depth_viz = np.zeros_like(color_bgr)
+
+    # Create Side-by-Side image
+    side_by_side = np.hstack((color_bgr, depth_viz))
     
+    # Save Image
+    viz_path = os.path.join(save_dir, f"view{index:02d}_viz.png")
+    cv2.imwrite(viz_path, side_by_side)
 
-    depth_colormap = cv2.applyColorMap(
-            cv2.convertScaleAbs(last_depth_data, alpha=0.5), 
-            cv2.COLORMAP_JET
-        )
-    img_file_path = os.path.join(save_dir, f"view{index:02d}_depth_color.png")
-    cv2.imwrite(img_file_path, depth_colormap)
+    # --- POINT CLOUD PROCESSING ---
+    merged_verts = np.vstack(all_points)
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(merged_verts)
+    
+    # Voxel downsampling (2mm)
+    pcd = pcd.voxel_down_sample(voxel_size=2.0)
 
-    pcd_file_path = os.path.join(save_dir, f"view{index:02d}.pcd")
-    tf_file_path = os.path.join(save_dir, f"view{index:02d}_tf.npy")
-    np.save(tf_file_path, T_base_camera)
-    o3d.io.write_point_cloud(pcd_file_path, pcd)
-    print(f"Successfully saved merged {len(np.asarray(pcd.points))} points to {pcd_file_path}")
+    # Save PCD and TF
+    pcd_path = os.path.join(save_dir, f"view{index:02d}.pcd")
+    o3d.io.write_point_cloud(pcd_path, pcd)
+    np.save(os.path.join(save_dir, f"view{index:02d}_tf.npy"), T_base_camera)
+
+    print(f"Saved View {index}: {len(pcd.points)} points. Visualization: {viz_path}")
 
 
 def home_robot():
@@ -222,17 +209,6 @@ def home_robot():
     print("Moving to Home position...")
     movej([0, 0, 90, 0, 90, 0], v=15, a=30) 
 
-
-def translation_matrix(x, y, z):
-    """
-    Creates a 4x4 homogenous transformation matrix 
-    representing only a translation (no rotation).
-    """
-    T = np.eye(4) # Creates a 4x4 Identity Matrix
-    T[0, 3] = x   # Set X translation
-    T[1, 3] = y   # Set Y translation
-    T[2, 3] = z   # Set Z translation
-    return T
 
 def pose_to_matrix(pose):
     """
@@ -292,9 +268,7 @@ def matrix_to_pose_zyz(matrix):
     return [x, y, z, alpha, beta, gamma]
 
 
-
-
-def get_tf_matrix_gpt(tf_buffer, target, source):
+def get_tf_matrix(tf_buffer, target, source):
     """
     Gets the transformation matrix between two frames, with translation in millimeters.
     Args:
@@ -332,22 +306,59 @@ def get_tf_matrix_gpt(tf_buffer, target, source):
 
 
 def capture():
-    T_current = get_tf_matrix_gpt(tf_buffer, target='base_0', source='realsense_RGBframe')
+    T_current = get_tf_matrix(tf_buffer, target='base_0', source='realsense_RGBframe')
     time.sleep(1)
     capture_scan_view(pipeline, align, T_current, 0, save_dir=pcd_save_dir, duration=1.0)
 
 
-def transform_to_cam(pose):
-    pose[0] -= 85.15
-    pose[1] -= 32.5
-    pose[2] += 122.85
 
-    # force down
-    pose[3] = 3.4242515563964844
-    pose[4] = -179.9999542236328
-    pose[5] = 3.4242515563964844
+def transform_to_cam_def():
+    "reference set camera to top of object"
+    "Input are x, y, z, r, p, y"
+    "output are x, y, z, z, y, z"
 
-    return pose
+    # T_cam2ob = [obj_cam_pos[0], obj_cam_pos[1], obj_cam_pos[2], 0.0, 180.0, 90.0] #T_cam2ob, xyzrpy def look inside
+    t_cam2ob = [obj_cam_pos[0], obj_cam_pos[1], obj_cam_pos[2], 0.0, 180.0, -90.0] #T_cam2ob, xyzrpy def look outside
+    
+    t_base2ob = T_base2cam @ pose_to_matrix(t_cam2ob)
+    t_ob2cam_goal = [[0, 1, 0, 0],
+                    [1, 0, 0, 0],
+                    [0, 0, -1, SCAN_HEIGHT],
+                    [0, 0, 0, 1]]
+    t_base2link = t_base2ob @ t_ob2cam_goal @ np.linalg.inv(T_link2cam)
+    target_link6 = matrix_to_pose_zyz(t_base2link)
+
+    return target_link6
+
+
+def transform_to_cam(t_base2goal, t_link2cam):
+    """
+    Correctly transforms the target from Camera Goal to Link6 Base.
+    Input: 4x4 Homogeneous Matrix (T_base2goal)
+    Output: [x, y, z, A, B, C] in Doosan ZYZ
+    """
+    # 1. Calculate the Link6 position in Base frame
+    # T_base2link = T_base2goal @ T_cam2link
+    # (Note: np.linalg.inv(T_link2cam) is T_cam2link)
+    t_base2link = t_base2goal @ np.linalg.inv(t_link2cam)
+    
+    # 2. Convert directly to ZYZ for the Doosan Robot
+    target_link6_zyz = matrix_to_pose_zyz(t_base2link)
+
+    return target_link6_zyz
+
+
+def zyz_to_rpy(zyz_angles, degrees=True):
+    """
+    Converts Euler ZYZ (Doosan style) to RPY (XYZ Euler).
+    """
+    # Create rotation object from ZYZ
+    r = R.from_euler('zyz', zyz_angles, degrees=degrees)
+    
+    # Convert to RPY (extrinsic XYZ or intrinsic xyz depending on your transform_to_cam)
+    # Most ROS-based 'RPY' uses 'xyz' (intrinsic) or 'XYZ' (extrinsic).
+    rpy = r.as_euler('xyz', degrees=degrees)
+    return rpy
 
 
 if __name__ == "__main__":
@@ -369,16 +380,16 @@ if __name__ == "__main__":
 
     # Detection & Localization
     obj_cam_pos, obb_angle = get_yolo_detection(pipeline, align, model, intrinsics, depth_scale)
-    T_init = get_tf_matrix_gpt(tf_buffer, target='base_0', source='realsense_RGBframe')
+    T_init = get_tf_matrix(tf_buffer, target='base_0', source='realsense_RGBframe')
     obj_base_pos = (T_init @ np.append(obj_cam_pos, 1))[:3]
     obj_base_pose = [obj_base_pos[0], obj_base_pos[1], obj_base_pos[2], 0.0, obb_angle, 0.0]
     np.save("PCD_Data/initial_obj_pose.npy", obj_base_pose)
 
 
     # Scanning Parameters
-    SCAN_HEIGHT = 500         # m above the object
-    VIEWPOINTS = 8              # Number of scans
-    DESIRED_ANGLE_DEG = 75.0    # degrees
+    SCAN_HEIGHT = 300         # m above the object
+    VIEWPOINTS = 16              # Number of scans
+    DESIRED_ANGLE_DEG = 65.0    # degrees
     pcd_save_dir = "PCD_Data"   
     
     SCAN_RADIUS = SCAN_HEIGHT * math.tan(math.radians(90.0 - DESIRED_ANGLE_DEG)) 
@@ -391,291 +402,54 @@ if __name__ == "__main__":
     link6_path = []      # target based on link6
     camera_path = []    # target based on camera
 
-    T_link2cam = get_tf_matrix_gpt(tf_buffer, source='link6', target='realsense_RGBframe')
-        
+    T_base2cam = get_tf_matrix(tf_buffer, source='realsense_RGBframe', target='base_0')
+    T_link2cam = get_tf_matrix(tf_buffer, source='realsense_RGBframe', target='link6')    
+
 
     # Planning Phase
     for i in range(VIEWPOINTS):
         # Calculate circular position
         angle = math.radians((360.0 / VIEWPOINTS) * i)
+
         tx = obj_base_pose[0] + SCAN_RADIUS * math.cos(angle)
         ty = obj_base_pose[1] + SCAN_RADIUS * math.sin(angle)
         tz = obj_base_pose[2] + SCAN_HEIGHT
 
+        zyz = calculate_look_at_zyz([tx, ty, tz], obj_base_pose[:3])
+        rpy = zyz_to_rpy(zyz)
 
-        
-        # This matrix describes the camera's orientation in the Base frame
-        # zyz = calculate_look_at_zyz([tx, ty, tz], obj_base_pose[:3])
-        # target_pose = [tx, ty, tz, zyz[0], zyz[1], zyz[2]]
+        link_pose_rpy = [tx, ty, tz, rpy[0], rpy[1], rpy[2]]
+        link_pose_zyz = transform_to_cam(pose_to_matrix(link_pose_rpy), T_link2cam)
+        link6_path.append(link_pose_zyz)
 
-
-        # T_base_obj = translation_matrix(tx, ty, tz)
-        # T_base_link6_new = T_base_obj @ T_cam_to_link6
-        # final_xyz = list(T_base_link6_new[:3, 3])
-        # wrist_pose = [final_xyz[0], final_xyz[1], final_xyz[2], target_pose[3], target_pose[4], target_pose[5]]
-
-        link6_pose = [tx, ty, tz, 0, 0, 0]
-
-        camera_pose = transform_to_cam(link6_pose)
-
-        link6_path.append(link6_pose)
-        camera_path.append(camera_pose)
 
     # Moving Phase
 def move_path():
     for i in range(VIEWPOINTS):
-        print(f"Moving to Viewpoint {i}...")
-        movel(camera_path[i], v=100, a=200) # Doosan Move command
+        print(f"Moving to Viewpoint {i+1}...")
+        movel(link6_path[i], v=100, a=200) # Doosan Move command
         time.sleep(1) 
+
         # Capture and merge from each viewpoint
-        T_current = get_tf_matrix_gpt(tf_buffer, target='base_0', source='realsense_RGBframe')
+        T_current = get_tf_matrix(tf_buffer, target='base_0', source='realsense_RGBframe')
         capture_scan_view(pipeline, align, T_current, i+1, save_dir=pcd_save_dir, duration=1.0)
         time.sleep(0.5)
 
-    # # Return Home
-    # home_robot()
+    # Return Home
+    time.sleep(1)
+    home_robot()
 
 
-# def move_to_camera_above_object_transformation():
-#     global center_pose, center_pose_transformed, T_init
-    # known yolo position in cam frame
-    # obj_cam_pos 
-    # obb_angle
 
 
-T_link2cam = get_tf_matrix_gpt(tf_buffer, source='realsense_RGBframe', target='link6')
-# T_cam2ob = [obj_cam_pos[0], obj_cam_pos[1], obj_cam_pos[2], 0.0, 180.0, 90.0] #T_cam2ob def look inside
-T_cam2ob = [obj_cam_pos[0], obj_cam_pos[1], obj_cam_pos[2], 0.0, 180.0, -90.0] #T_cam2ob def look outside
-# transform to base frame
-T_base2cam = get_tf_matrix_gpt(tf_buffer, source='realsense_RGBframe', target='base_0') #visually, it's directing from
-T_base2ob = T_base2cam @ pose_to_matrix(T_cam2ob)
 
-T_ob2cam_goal = [[0, 1, 0, 0],
-                [1, 0, 0, 0],
-                [0, 0, -1, SCAN_HEIGHT],
-                [0, 0, 0, 1]]
-
-
-T_base2link = T_base2ob @ T_ob2cam_goal @ np.linalg.inv(T_link2cam)
-# target_link6 = matrix_to_pose(T_base2link)
-target_link6 = matrix_to_pose_zyz(T_base2link)
-
-# movel(target_link6, v=25, a=150)
-
-
-
-    # method 1
-    # move link6 to position where camera is above object
-    # Formula derivation
-    # T_base_link6 @ T_link6_cam = T_base_wp @ T_wp_cam 
-    # T_base_link6 @ T_link6_cam = T_base_goal
-    # T_base_link6 = T_base_goal @ inv(T_link6_cam)
-
-    # T_base_goal = pose_to_matrix(goal_base_pose) # makes sense
-    # T_link6_cam = get_tf_matrix_gpt(tf_buffer, source='link6', target='realsense_RGBframe') # same with rosrun tf
-    # T_base_link6 = T_base_goal @ np.linalg.inv(T_link6_cam)
-
-
-    # target_link6[3] = 3.4242515563964844
-    # target_link6[4] = -179.9999542236328
-    # target_link6[5] = 3.4242515563964844
-
-
-
-    # method 2
-    # T_base_goal = obj_base_pose
-    # T_base_goal[2,3] += SCAN_HEIGHT
-
-    # T_cam_link6 = get_tf_matrix_gpt(tf_buffer, source='realsense_RGBframe', target='link6')
-
-    # T_base_link6 = T_base_goal @ T_cam_link6
-
-
-
-    # damnn 3
-    # r_goal = goal_base_pose[:3]
-    # T_cam_link6 = get_tf_matrix_gpt(tf_buffer, source='realsense_RGBframe', target='link6')
-    # r_l_g = T_cam_link6[:3, 3]
-
-    # link6_position_for_camera = r_goal + r_l_g
-
-    # target = list(link6_position_for_camera) + [3.4242515563964844, -179.9999542236328, 3.4242515563964844]
-    # target[2] = 350
-
-    # target_r_goal = list(r_goal) + [3.4242515563964844, -179.9999542236328, 3.4242515563964844]
-
-
-
-
-    # ke tengah link6
-target = list(goal_base_pose[:3]) + [3.4242515563964844, -179.9999542236328, 3.4242515563964844]
-
-    # posisi link6 top of object
-    # [611.1490142611697, -10.020748209501974, 502.9430853352909, 3.4242515563964844, -179.9999542236328, 3.4242515563964844]
-
-    # posisi cam top of object
-
-target_transformed = [goal_base_pose[0]-85.15, goal_base_pose[1]-32.5, goal_base_pose[2]+122.85, 3.4242515563964844, -179.9999542236328, 3.4242515563964844]
-
-test = [goal_base_pose[0]-85.15, goal_base_pose[1]-32.5, goal_base_pose[2]+122.85, 10, -179.9999542236328, 15]
-
-# perfect down
-test = [goal_base_pose[0]-85.15, goal_base_pose[1]-32.5, goal_base_pose[2]+122.85, 0.01, -179.9999542236328, 0.01]
-# yaw 5
-test = [goal_base_pose[0]-85.15, goal_base_pose[1]-32.5, goal_base_pose[2]+122.85, 5, -179.9999542236328, 0.01]
-# yaw 0
-test = [goal_base_pose[0]-85.15, goal_base_pose[1]-32.5, goal_base_pose[2]+122.85, 5, -179.9999542236328, 5]
-# yaw 10
-test = [goal_base_pose[0]-85.15, goal_base_pose[1]-32.5, goal_base_pose[2]+122.85, 5, -179.9999542236328, -5]
-
-
-
-# pitch 15
-test = [goal_base_pose[0]-85.15, goal_base_pose[1]-32.5, goal_base_pose[2]+122.85, 0.01, -165.0, 0.01]
-# pitch 15 and roll 15
-test = [goal_base_pose[0]-85.15, goal_base_pose[1]-32.5, goal_base_pose[2]+122.85, 15, -165, 15]
-# pitch 15 and yaw 15
-test = [goal_base_pose[0]-85.15, goal_base_pose[1]-32.5, goal_base_pose[2]+122.85, 15, -165, 0.01]
-
-
-
-def test():
-    path = []
-    path.append([goal_base_pose[0]-85.15, goal_base_pose[1]-32.5, goal_base_pose[2]+122.85, 3.4242515563964844, -179.9999542236328, 3.4242515563964844])
-    path.append([goal_base_pose[0]-85.15, goal_base_pose[1]-32.5, goal_base_pose[2]+122.85, 3.4242515563964844, -175, 3.4242515563964844])
-    path.append([goal_base_pose[0]-85.15, goal_base_pose[1]-32.5, goal_base_pose[2]+122.85, 3.4242515563964844, -170, 3.4242515563964844])
-    path.append([goal_base_pose[0]-85.15, goal_base_pose[1]-32.5, goal_base_pose[2]+122.85, 3.4242515563964844, -165, 3.4242515563964844])
-    path.append([goal_base_pose[0]-85.15, goal_base_pose[1]-32.5, goal_base_pose[2]+122.85, 3.4242515563964844, -160, 3.4242515563964844])
-    path.append([goal_base_pose[0]-85.15, goal_base_pose[1]-32.5, goal_base_pose[2]+122.85, 3.4242515563964844, -155, 3.4242515563964844])
-    path.append([goal_base_pose[0]-85.15, goal_base_pose[1]-32.5, goal_base_pose[2]+122.85, 3.4242515563964844, -150, 3.4242515563964844])
-
-    for i in range(len(path)):
-        movel(path[i], v=15, a=30)
-        time.sleep(1)
-
-
-    # transformasi
-    # T_wp_base = get_tf_matrix_gpt(tf_buffer, source='realsense_RGBframe', target='base_0')
-    # T_cam_link6 = get_tf_matrix_gpt(tf_buffer, source='link6', target='realsense_RGBframe')
-
-
-
-    # goal_base_pose_2 = target
-    # goal_base_pose_2[0] -= 32
-    # goal_base_pose_2[1] -= 85.1
-    # goal_base_pose_2[3] = 3.4242515563964844
-    # goal_base_pose_2[4] = -179.9999542236328
-    # goal_base_pose_2[5] = 3.4242515563964844
-
-
-    # get_tf_matrix_gpt(tf_buffer, source='link6', target='base_0')
-
-    # obj_base_pose
-    # b2wp= obj_base_pose
-    # b2wp[4] = 0.0
-
-    # T_b2wp = pose_to_matrix(b2wp)
-
-    # T_wp2cam_goal = np.array([
-    #                 [1, 0,  0, 0],
-    #                 [0, -1,  0, 0],
-    #                 [0, 0, -1, SCAN_HEIGHT],
-    #                 [0, 0,  0, 1]])
-    
-    # T_link2cam = get_tf_matrix(tf_buffer, source='link6', target='realsense_RGBframe')
-
-
-    # T_b2link = T_b2wp @ T_wp2cam_goal @ np.linalg.inv(T_link2cam)
-    
-    # b2link = matrix_to_pose(T_b2link)
-
-    # movel(b2link, v=50, a=150)
-
-
-    # print(matrix_to_pose(get_tf_matrix(tf_buffer, source='base_0', target='link6')))
-
-    # print(get_tf_matrix(tf_buffer, source='base_0', target='link6'))
-
-
-    # # manual manipulation, any z, look downward
-    # center_pose = [obj_base_pose[0], obj_base_pose[1], SCAN_HEIGHT, obj_base_pose[3], obj_base_pose[4], obj_base_pose[5]]
-    # # move link6 to center above object
-    # # movel(center_pose, v=25, a=150) 
-
-    # # transform center_pose to matrix form
-    # # T_base_center_pose = translation_matrix(center_pose[0], center_pose[1], SCAN_HEIGHT)
-    # T_base_center_pose = pose_to_matrix(center_pose)
-    
-    # # transformation from link6 to camera
-    # T_link6_cam = get_tf_matrix(tf_buffer, source='link6', target='realsense_RGBframe')
-    # T_cam_link6 = np.linalg.inv(T_link6_cam)
-
-    # # do the transformation
-    # T_base_link6_new = T_base_center_pose @ T_cam_link6
-    # center_pose_transformed = matrix_to_pose(T_base_link6_new)
-
-
-
-    # # final_xyz = list(T_base_link6_new[:3, 3])
-    # # # manual manipuation again
-    # # center_pose_transformed = [final_xyz[0], final_xyz[1], SCAN_HEIGHT, 3.4242515563964844, -179.9999542236328, 3.4242515563964844]
-    # # time.sleep(1)
-    # movel(center_pose_transformed, v=50, a=150)
-
-    # # then do this
-    # time.sleep(2)
-    # T_init = get_tf_matrix(tf_buffer, target='base_0', source='realsense_RGBframe')
-    # capture_scan_view(pipeline, align, T_init, 0, save_dir=pcd_save_dir, duration=1.0)
-
-    # print("Object Pose: ", obj_base_pose)
-    # print("Camera Above Object Pose: \n", T_init)
-
-
-
-
-# # TEST FUNCTIONS
-# def move_to_camera_above_object_manual():
-#     global center_pose_manual, center_pose_transformed_manual, T_init_manual
-#     # known yolo position
-#     obj_base_pose
-    
-#     center_pose_manual = [obj_base_pose[0], obj_base_pose[1], SCAN_HEIGHT, 3.4242515563964844, -179.9999542236328, 3.4242515563964844]
-
-#     # if do
-#     # T_cam_to_link6 = get_tf_matrix(tf_buffer, target='realsense_RGBframe', source='link6')
-#     # output is like this
-#     # array([[          0,          -1,          -0,        32.5],
-#     #     [          1,           0,           0,       85.15],
-#     #     [          0,          -0,           1,     -122.85],
-#     #     [          0,           0,           0,           1]])
-    
-#     # move link6 to center above object
-#     # movel(center_pose, v=50, a=150)
-
-#     # trial and error so camera move to above object
-#     center_pose_transformed_manual = [center_pose_manual[0]-85.15, center_pose_manual[1]-32.5, center_pose_manual[2], center_pose_manual[3], center_pose_manual[4], center_pose_manual[5]]
-    
-#     time.sleep(1)
-#     movel(center_pose_transformed_manual, v=50, a=150)
-
-#     # then do this
-#     time.sleep(2)
-#     T_init_manual = get_tf_matrix(tf_buffer, target='base_0', source='realsense_RGBframe')
-#     capture_scan_view(pipeline, align, T_init_manual, 0, save_dir=pcd_save_dir, duration=1.0)
-
-#     print("Object Pose: ", obj_base_pose)
-#     print("Camera Above Object Pose: \n", T_init_manual)
-
-
-
-
-
-
-
-
-# T1 = get_tf_matrix_gpt(tf_buffer, target='base_0', source='realsense_RGBframe')
-# T2 = get_tf_matrix_gpt(tf_buffer, target='base_0', source='link6')
-# T3 = get_tf_matrix_gpt(tf_buffer, target='link6', source='realsense_RGBframe')
-
-
-
+# test pergerakan
+# T_cam2ob = [obj_cam_pos[0], obj_cam_pos[1], obj_cam_pos[2], 0.0, 180.0, -90.0+obb_angle] #T_cam2ob, xyzrpy def look outside
+# T_base2ob = T_base2cam @ pose_to_matrix(T_cam2ob)
+# T_ob2cam_goal = [[0, 1, 0, 0],
+#                 [1, 0, 0, 0],
+#                 [0, 0, -1, SCAN_HEIGHT],
+#                 [0, 0, 0, 1]]
+# T_base2goal = T_base2ob @ T_ob2cam_goal
+# important_1 = transform_to_cam(T_base2goal, T_link2cam)
+# end of test pergerakan
