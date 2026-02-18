@@ -77,7 +77,7 @@ def get_yolo_detection(pipeline, align, model, intrinsics, depth_scale):
         else:
             print("Failed to align frames.")
         
-        results = model(color_img, conf=0.92)
+        results = model(color_img, conf=0.88)
         if results[0].obb is not None:
             # results[0].obb is sorted by confidence; index 0 is the best
             box = results[0].obb[0]
@@ -163,7 +163,7 @@ def capture_scan_view(pipeline, align, T_base_camera, index, save_dir="PCD_Data"
         os.makedirs(save_dir)
 
     # Prepare RGB (BGR for OpenCV)
-    color_bgr = cv2.cvtColor(last_color_image, cv2.COLOR_RGB2BGR)
+    # color_bgr = cv2.cvtColor(last_color_image, cv2.COLOR_RGB2BGR)
 
     # Prepare Normalized Depth (The "Blue Image" Fix)
     depth_mask = last_depth_data > 0
@@ -179,10 +179,10 @@ def capture_scan_view(pipeline, align, T_base_camera, index, save_dir="PCD_Data"
         # Make invalid/reflective holes pure black
         depth_viz[~depth_mask] = [0, 0, 0]
     else:
-        depth_viz = np.zeros_like(color_bgr)
+        depth_viz = np.zeros_like(last_color_image)
 
     # Create Side-by-Side image
-    side_by_side = np.hstack((color_bgr, depth_viz))
+    side_by_side = np.hstack((last_color_image, depth_viz))
     
     # Save Image
     viz_path = os.path.join(save_dir, f"view{index:02d}_viz.png")
@@ -228,7 +228,6 @@ def pose_to_matrix(pose):
     T[:3, :3] = rot_matrix  # Set the upper-left 3x3 part to the rotation matrix
     T[:3, 3] = [x, y, z]    # Set the upper-right 3x1 part to the translation vector
     return T
-
 
 
 def matrix_to_pose(matrix):
@@ -311,7 +310,6 @@ def capture():
     capture_scan_view(pipeline, align, T_current, 0, save_dir=pcd_save_dir, duration=1.0)
 
 
-
 def transform_to_cam_def():
     "reference set camera to top of object"
     "Input are x, y, z, r, p, y"
@@ -359,6 +357,21 @@ def zyz_to_rpy(zyz_angles, degrees=True):
     # Most ROS-based 'RPY' uses 'xyz' (intrinsic) or 'XYZ' (extrinsic).
     rpy = r.as_euler('xyz', degrees=degrees)
     return rpy
+
+
+def rpy_to_zyz(rpy_angles, degrees=True):
+    """
+    Converts RPY (XYZ Euler) to Euler ZYZ (Doosan style).
+    RPY is usually interpreted as intrinsic xyz or fixed-axis XYZ.
+    """
+    # Create rotation object from RPY
+    # Using 'xyz' (lowercase) denotes intrinsic rotations
+    r = R.from_euler('xyz', rpy_angles, degrees=degrees)
+    
+    # Convert to ZYZ (intrinsic) for Doosan
+    zyz = r.as_euler('zyz', degrees=degrees)
+    return zyz
+
 
 
 if __name__ == "__main__":
@@ -422,28 +435,81 @@ if __name__ == "__main__":
         link_pose_zyz = transform_to_cam(pose_to_matrix(link_pose_rpy), T_link2cam)
         link6_path.append(link_pose_zyz)
 
+    # Moving Phase (PKL Thesis)
+    if False:
+        for i in range(VIEWPOINTS):
+            print(f"Moving to Viewpoint {i+1}...")
+            movel(link6_path[i], v=100, a=200) # Doosan Move command
+            time.sleep(1) 
 
-    # Moving Phase
-def move_path():
-    for i in range(VIEWPOINTS):
-        print(f"Moving to Viewpoint {i+1}...")
-        movel(link6_path[i], v=100, a=200) # Doosan Move command
-        time.sleep(1) 
+            # Capture and merge from each viewpoint
+            T_current = get_tf_matrix(tf_buffer, target='base_0', source='realsense_RGBframe')
+            capture_scan_view(pipeline, align, T_current, i+1, save_dir=pcd_save_dir, duration=1.0)
+            time.sleep(0.5)
 
-        # Capture and merge from each viewpoint
-        T_current = get_tf_matrix(tf_buffer, target='base_0', source='realsense_RGBframe')
-        capture_scan_view(pipeline, align, T_current, i+1, save_dir=pcd_save_dir, duration=1.0)
-        time.sleep(0.5)
-
-    # Return Home
-    time.sleep(1)
-    home_robot()
-
+        # Return Home
+        time.sleep(1)
+        home_robot()
 
 
 
+# # testing taking from certain angle based on generated
+# yolo = obj_base_pose.copy()
 
-# test pergerakan
+# obj_base = obj_base_pose.copy()
+# obj_base[2] -= 8
+
+# cam_pose_obj_origin = [225.11641550749576, -168.0, 352.99976897167465, 0.0, 180.0, -90]
+
+# cam_pose_base = [0, 0, 0, 0, 0, 0]
+# cam_pose_base[0] = obj_base[0]+cam_pose_obj_origin[0]
+# cam_pose_base[1] = obj_base[1]-cam_pose_obj_origin[1]
+# cam_pose_base[2] = obj_base[2]+cam_pose_obj_origin[2]
+# cam_pose_base[3] = 179.9766606743857
+# cam_pose_base[4] = -0.011717987901194127
+# cam_pose_base[5] = 92.95075128118827
+
+# link_pose_base = transform_to_cam(pose_to_matrix(cam_pose_base), T_link2cam)
+
+# #### sampe sini doank rotasinya aneh, jadi manualin
+# # ngadep bawah
+# link_pose_base[3] = 9.459908485412598
+# link_pose_base[4] = 179.99188232421875
+# link_pose_base[5] = 9.467753410339355
+
+# zyz_angle = rpy_to_zyz([180+27, -35, 180+90]) #ig this is it
+# zyz_angle = rpy_to_zyz([180+27, -35, 180]) #ig this is it tapi diamankan
+
+
+# link_pose_base[3] = zyz_angle[0]
+# link_pose_base[4] = zyz_angle[1]
+# link_pose_base[5] = zyz_angle[2]
+
+# #### sampe sini doank kek muter
+
+# zyz_angle = rpy_to_zyz([153.25979406528558, -34.99998269794345, 180.0]) # default reference
+# zyz_angle = rpy_to_zyz([180, 0.01, 180]) # home angle in rpy
+# zyz_angle = rpy_to_zyz([180+15, 0.01, 180]) #  roll, muter
+# zyz_angle = rpy_to_zyz([180, 15, 180]) #  pitch, dangak, ke arah arurang
+# zyz_angle = rpy_to_zyz([180, 0.01, 180+15]) # muter di tempat itu sendiri
+
+# zyz_angle = rpy_to_zyz([180, -55, 180-35]) # angle testing, target 0, -63, -35
+# zyz_angle = rpy_to_zyz([180, 0, 180-35]) 
+
+
+
+# only for testing random
+# home_pose = [559.0001220703125, 34.499996185302734, 651.4995727539062, 3.4242515563964844, -179.9999542236328-15, 3.4242515563964844]
+# test_pose = [559.0001220703125, 34.499996185302734, 651.4995727539062, zyz_angle[0], zyz_angle[1], zyz_angle[2]]
+
+
+# rpy_angle = zyz_to_rpy([178.1530303955078, -179.9999237060547, 178.1530303955078]) # home angle in zyz
+# # array([       -180,  7.6254e-05,        -180])
+
+
+
+
+# # test pergerakan
 # T_cam2ob = [obj_cam_pos[0], obj_cam_pos[1], obj_cam_pos[2], 0.0, 180.0, -90.0+obb_angle] #T_cam2ob, xyzrpy def look outside
 # T_base2ob = T_base2cam @ pose_to_matrix(T_cam2ob)
 # T_ob2cam_goal = [[0, 1, 0, 0],
@@ -452,4 +518,4 @@ def move_path():
 #                 [0, 0, 0, 1]]
 # T_base2goal = T_base2ob @ T_ob2cam_goal
 # important_1 = transform_to_cam(T_base2goal, T_link2cam)
-# end of test pergerakan
+# # end of test pergerakan
