@@ -6,6 +6,7 @@ import os
 import math
 import time
 import cv2
+import re
 import numpy as np
 import open3d as o3d
 import pyrealsense2 as rs
@@ -355,6 +356,32 @@ def capture():
     capture_scan_view(pipeline, align, T_current, 0, save_dir=pcd_save_dir, duration=1.0)
 
 
+def load_viewpoint_poses(folder_path):
+    """
+    Loads all .npy pose files from a directory into a list, 
+    sorted numerically by the index in the filename.
+    """
+    # Regex to capture the index number from 'viewpoint_pose_X.npy'
+    def extract_number(filename):
+        match = re.search(r'viewpoint_pose_(\d+)\.npy', filename)
+        return int(match.group(1)) if match else -1
+
+    # Filter for .npy files and sort them (0, 1, 2... instead of 0, 1, 10...)
+    npy_files = [f for f in os.listdir(folder_path) if f.endswith('.npy')]
+    npy_files.sort(key=extract_number)
+
+    # Load data into list
+    viewpoint_poses = []
+    for file_name in npy_files:
+        full_path = os.path.join(folder_path, file_name)
+        try:
+            pose = np.load(full_path)
+            viewpoint_poses.append(pose)
+        except Exception as e:
+            print(f"Error loading {file_name}: {e}")
+
+    return viewpoint_poses
+
 
 if __name__ == "__main__":
     rospy.init_node('unified_grasp_scan')
@@ -381,52 +408,41 @@ if __name__ == "__main__":
     np.save("PCD_Data/initial_obj_pose.npy", obj_base_pose)
     
     
-    pcd_save_dir = "PCD_Data"
+    pcd_save_dir = r"PCD_Data"
+    path = r"viewpoints_candidate"
+    
+    viewpoint_poses = load_viewpoint_poses(path)
+
+    T_link2cam = get_tf_matrix(tf_buffer, source='realsense_RGBframe', target='link6') 
+    T_base2cam = get_tf_matrix(tf_buffer, source='realsense_RGBframe', target='base_0') # Changes overtime
+
+
+    T_cam2ob = [obj_cam_pos[0], obj_cam_pos[1], obj_cam_pos[2], 0.0, 180.0, obb_angle]
+    T_yolo2origin = np.array([[1, 0, 0,  0],
+                            [0, 1, 0,  0],
+                            [0, 0, 1, -8],
+                            [0, 0, 0,  1]])
+    
+    # Single Only
+    # T_goal2ob_origin = viewpoint_poses[0]
+    # T_base2ob_yolo = T_base2cam @ pose_to_matrix(T_cam2ob)
+    # T_base2goal = T_base2ob_yolo @ T_yolo2origin @ T_goal2ob_origin
+    # goal_pose_cam = T_base2goal @ np.linalg.inv(T_link2cam)
+    # goal_pose_cam = transform_to_cam(T_base2goal, T_link2cam)
+
+    # Multi path based on custom waypoint
+    goal_pose_cam = []
+    for i in range(len(viewpoint_poses)):
+        T_goal2ob_origin = viewpoint_poses[i]
+        T_base2ob_yolo = T_base2cam @ pose_to_matrix(T_cam2ob)
+        T_base2goal = T_base2ob_yolo @ T_yolo2origin @ T_goal2ob_origin
+        goal_pose_cam.append(transform_to_cam(T_base2goal, T_link2cam))
+
 
 
 # Testing Functions
 
-# T_base2cam = get_tf_matrix(tf_buffer, source='realsense_RGBframe', target='base_0')
-# T_cam2ob = [obj_cam_pos[0], obj_cam_pos[1], obj_cam_pos[2], 0.0, 180.0, -90.0+obb_angle]
-# T_base2ob = T_base2cam @ pose_to_matrix(T_cam2ob)
-# T_link2cam = get_tf_matrix(tf_buffer, source='realsense_RGBframe', target='link6')
-# # T_base2goal = 
-
-
-# # reset
-# offset_pose = [528.9990844726562, 34.499996185302734, 651.500732421875, 178.1530303955078, -179.9999237060547, 178.1530303955078]
-# home_pose = [558.9990844726562, 34.499996185302734, 651.500732421875, 178.1530303955078, -179.9999237060547, 178.1530303955078]
-# home_zyz = [178.1530303955078, -179.9999237060547, 178.1530303955078]
-# home_rpy = zyz_to_rpy(home_zyz) # [-180, 7.6254e-05, -180]
-
-
-# home_zyz = rpy_to_zyz([-180,7.6254e-05,-180]) # [-5.2722e-09, 180, -5.2722e-09]
-
-
-# ref_pose = [home_pose[0], home_pose[1], home_pose[2], home_zyz[0], home_zyz[1], home_zyz[2]]
-
-
-# # cam di home
-# roll = -180+0
-# pitch = 0
-# yaw = -180+0
-# goal_pose = [home_pose[0], home_pose[1], home_pose[2]] + list(rpy_to_zyz([roll, pitch, yaw])) # goal pose based on link6
-# T_base2goal = pose_to_matrix(goal_pose, zyz=True)
-# goal_pose_cam = transform_to_cam(T_base2goal, T_link2cam)
-
-
-# roll = -180+0
-# pitch = 0
-# yaw = -180+90
-# goal_pose = [home_pose[0], home_pose[1], home_pose[2]] + list(rpy_to_zyz([roll, pitch, yaw])) # goal pose based on link6
-# T_base2goal = pose_to_matrix(goal_pose, zyz=True)
-# goal_pose_cam = transform_to_cam(T_base2goal, T_link2cam)
-
-
-
-# SCAN_HEIGHT = 300
-
-# # 
+# # start test
 # T_cam2ob = [obj_cam_pos[0], obj_cam_pos[1], obj_cam_pos[2], 0.0, 180.0, obb_angle]
 # T_base2cam = get_tf_matrix(tf_buffer, source='realsense_RGBframe', target='base_0')
 # T_base2ob = T_base2cam @ pose_to_matrix(T_cam2ob)
@@ -439,19 +455,7 @@ if __name__ == "__main__":
 # # end of test
 
 
-# # index 3
-
-# T_yolo2origin = np.array([[1, 0, 0,  0],
-#                           [0, 1, 0,  0],
-#                           [0, 0, 1, -8],
-#                           [0, 0, 0,  1]])
-
-# T_goal2ob_origin = np.array([[-0.819152, 0.258078, -0.512236, 225.116416],
-#                              [0.000000, 0.893056, 0.449946, -168.000000],
-#                              [0.573576, 0.368574, -0.731549, 352.999769],
-#                              [0.000000, 0.000000, 0.000000, 1.000000]])
 
 
-# T_base2ob_yolo = T_base2cam @ pose_to_matrix(T_cam2ob)
-# T_base2goal = T_base2ob_yolo @ T_yolo2origin @ T_goal2ob_origin
-# goal_pose_cam = transform_to_cam(T_base2goal, T_link2cam)
+
+
