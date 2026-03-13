@@ -360,7 +360,7 @@ def rpy_to_zyz(rpy_angles, degrees=True):
 def home_robot():
     """Moves the robot to the predefined home joint position."""
     print("Moving to Home position...")
-    movej([0, 0, 90, 0, 90, 0], v=15, a=30) 
+    movej([0, 0, 90, 0, 90, 0], v=30, a=60) 
 
 
 def capture(index=0):
@@ -470,8 +470,13 @@ if __name__ == "__main__":
 
 def move():
     for i in range(len(goal_pose_cam)):
+    # for i in range(0, 3+1):
+    # for i in range(18, 27):
+        if (i in (4, 10, 18, 28)):
+            home_robot()
+            time.sleep(3)
         print(f"Moving to Viewpoint {i}...")
-        movel(goal_pose_cam[i], v=100, a=200) # Doosan Move command
+        movel(goal_pose_cam[i], v=75, a=150) # Doosan Move command
         time.sleep(1) 
         # Capture and merge from each viewpoint
         T_current = get_tf_matrix(tf_buffer, target='base_0', source='realsense_RGBframe')
@@ -480,3 +485,5 @@ def move():
     # Return Home
     time.sleep(1)
     home_robot()     
+
+
