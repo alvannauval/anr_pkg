@@ -25,20 +25,44 @@ def init_robot(robot_id="dsr01", model="m1013"):
 
 
 def init_realsense():
-    """Starts the RealSense pipeline and returns stream objects."""
+    """Starts the RealSense pipeline with parameters from official roslaunch."""
     pipeline = rs.pipeline()
     config = rs.config()
-    config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
-    config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
+    
+    # Matching ROS default resolution/fps
+    config.enable_stream(rs.stream.color, 848, 480, rs.format.bgr8, 30)
+    config.enable_stream(rs.stream.depth, 848, 480, rs.format.z16, 30)
 
     profile = pipeline.start(config)
+    
+    # Get sensors
+    dev = profile.get_device()
+    depth_sensor = dev.first_depth_sensor()
+    color_sensor = dev.query_sensors()[1] # Usually index 1 for color
+
+    # # 1. Depth Exposure & Gain
+    depth_sensor.set_option(rs.option.exposure, 8500) 
+    depth_sensor.set_option(rs.option.gain, 16)
+    depth_sensor.set_option(rs.option.enable_auto_exposure, True) 
+
+    # 2. Color Exposure
+    color_sensor.set_option(rs.option.enable_auto_exposure, True)
+
+    # 3. Laser Projector
+    # This ensures uses its IR pattern
+    if depth_sensor.supports(rs.option.emitter_enabled):
+        depth_sensor.set_option(rs.option.emitter_enabled, 1) # 1 is On
+
+    # 4. Visual Preset
+    # (1 = Default | 3 = High Accuracy)
+    depth_sensor.set_option(rs.option.visual_preset, 1)
+
+    # # --- EXISTING LOGIC ---
     align = rs.align(rs.stream.color)
     intrinsics = profile.get_stream(rs.stream.color).as_video_stream_profile().get_intrinsics()
-    
-    depth_sensor = profile.get_device().first_depth_sensor()
-    depth_scale = depth_sensor.get_depth_scale() # Usually 0.001 (1mm per unit)
+    depth_scale = depth_sensor.get_depth_scale()
 
-    rospy.loginfo("RealSense Pipeline Started. Depth Scale is: {depth_scale}")
+    rospy.loginfo(f"RealSense Pipeline Started. Depth Scale: {depth_scale}")
     return pipeline, align, intrinsics, depth_scale
 
 def get_robust_depth(depth_frame, x, y, depth_scale, window_size=5):
@@ -472,18 +496,19 @@ def move():
     for i in range(len(goal_pose_cam)):
     # for i in range(0, 3+1):
     # for i in range(18, 27):
-        if (i in (4, 10, 18, 28)):
-            home_robot()
-            time.sleep(3)
+        # if (i in (4, 10, 18, 28)):
+        #     home_robot()
+        #     time.sleep(3)
         print(f"Moving to Viewpoint {i}...")
         movel(goal_pose_cam[i], v=75, a=150) # Doosan Move command
         time.sleep(1) 
-        # Capture and merge from each viewpoint
-        T_current = get_tf_matrix(tf_buffer, target='base_0', source='realsense_RGBframe')
-        capture_scan_view(pipeline, align, T_current, i, save_dir=pcd_save_dir, duration=1.0)
-        time.sleep(0.5)
+        # # Capture and merge from each viewpoint
+        # T_current = get_tf_matrix(tf_buffer, target='base_0', source='realsense_RGBframe')
+        # capture_scan_view(pipeline, align, T_current, i, save_dir=pcd_save_dir, duration=1.0)
+        # time.sleep(0.5)
     # Return Home
     time.sleep(1)
     home_robot()     
+
 
 
