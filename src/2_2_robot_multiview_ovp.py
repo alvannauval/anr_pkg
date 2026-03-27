@@ -11,10 +11,11 @@ import numpy as np
 import open3d as o3d
 import pyrealsense2 as rs
 import rospy
+import tf
 import tf2_ros
 from scipy.spatial.transform import Rotation as R
 from ultralytics import YOLO
-import tf
+from std_msgs.msg import Float64MultiArray
 
 
 def init_robot(robot_id="dsr01", model="m1013"):
@@ -40,7 +41,7 @@ def init_realsense():
     depth_sensor = dev.first_depth_sensor()
     color_sensor = dev.query_sensors()[1] # Usually index 1 for color
 
-    # # 1. Depth Exposure & Gain
+    # 1. Depth Exposure & Gain
     depth_sensor.set_option(rs.option.exposure, 8500) 
     depth_sensor.set_option(rs.option.gain, 16)
     depth_sensor.set_option(rs.option.enable_auto_exposure, True) 
@@ -54,10 +55,10 @@ def init_realsense():
         depth_sensor.set_option(rs.option.emitter_enabled, 1) # 1 is On
 
     # 4. Visual Preset
-    # (1 = Default | 3 = High Accuracy)
-    depth_sensor.set_option(rs.option.visual_preset, 1)
+    # (1 = Default | 3 = High Accuracy | 4 = High Density | 5 = Medium Density)
+    depth_sensor.set_option(rs.option.visual_preset, 5)
 
-    # # --- EXISTING LOGIC ---
+    # --- EXISTING LOGIC ---
     align = rs.align(rs.stream.color)
     intrinsics = profile.get_stream(rs.stream.color).as_video_stream_profile().get_intrinsics()
     depth_scale = depth_sensor.get_depth_scale()
@@ -419,6 +420,23 @@ def load_viewpoint_poses(folder_path):
 
     return viewpoint_poses
 
+def get_current_posx_once():
+    """Waits for one message from the rostopic and returns the list."""
+    try:
+        data = rospy.wait_for_message("/dsr01m1013/state/current_posx", Float64MultiArray, timeout=2.0)
+        return list(data.data)
+    except rospy.ROSException:
+        rospy.logwarn("Posx topic timeout!")
+        return None
+
+
+def get_robot_pose_api():
+    """Returns the [x, y, z, a, b, c] list directly from the API."""
+    # get_current_posx() is part of the DSR_ROBOT module
+    pos = get_current_posx() 
+    if pos:
+        return pos # This is a list of 6 floats
+    return None
 
 if __name__ == "__main__":
     rospy.init_node('unified_grasp_scan')
@@ -437,16 +455,15 @@ if __name__ == "__main__":
     pipeline, align, intrinsics, depth_scale = init_realsense()
     model = YOLO("model/workpiece1_OBB.pt")
 
+    pcd_save_dir = r"pcd_data"
+    path = r"viewpoints_candidate"
+    
     # Detection & Localization
     obj_cam_pos, obb_angle = get_yolo_detection(pipeline, align, model, intrinsics, depth_scale)
     T_init = get_tf_matrix(tf_buffer, target='base_0', source='realsense_RGBframe')
     obj_base_pos = (T_init @ np.append(obj_cam_pos, 1))[:3]
     obj_base_pose = [obj_base_pos[0], obj_base_pos[1], obj_base_pos[2], 0.0, obb_angle, 0.0]
     np.save("pcd_data/initial_obj_pose.npy", obj_base_pose)
-    
-    
-    pcd_save_dir = r"pcd_data"
-    path = r"viewpoints_candidate"
     
     viewpoint_poses = load_viewpoint_poses(path)
 
@@ -501,11 +518,11 @@ def move():
         #     time.sleep(3)
         print(f"Moving to Viewpoint {i}...")
         movel(goal_pose_cam[i], v=75, a=150) # Doosan Move command
-        time.sleep(1) 
-        # # Capture and merge from each viewpoint
-        # T_current = get_tf_matrix(tf_buffer, target='base_0', source='realsense_RGBframe')
-        # capture_scan_view(pipeline, align, T_current, i, save_dir=pcd_save_dir, duration=1.0)
-        # time.sleep(0.5)
+        time.sleep(2) 
+        # Capture and merge from each viewpoint
+        T_current = get_tf_matrix(tf_buffer, target='base_0', source='realsense_RGBframe')
+        capture_scan_view(pipeline, align, T_current, i, save_dir=pcd_save_dir, duration=1.0)
+        time.sleep(0.5)
     # Return Home
     time.sleep(1)
     home_robot()     
