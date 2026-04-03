@@ -12,3 +12,4 @@
 # End of https://www.gitignore.io/api/visualstudiocode
 
 testing/
+src/pcd_data/testing_data/training_first/
