@@ -13,3 +13,6 @@
 
 testing/
 src/pcd_data/testing_data/training_first/
+src/pcd_data/testing_data/training_second/
+src/viewpoints_candidate/testing_data/training_first/*
+src/viewpoints_candidate/testing_data/training_second/* 
