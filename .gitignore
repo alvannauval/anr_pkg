@@ -12,11 +12,10 @@
 # End of https://www.gitignore.io/api/visualstudiocode
 
 testing/
-src/pcd_data/testing_data/
-src/viewpoints_candidate/testing_data/
 src/analyze/
 
-# src/pcd_data/testing_data/training_first/
-# src/pcd_data/testing_data/training_second/
-# src/viewpoints_candidate/testing_data/training_first/*
-# src/viewpoints_candidate/testing_data/training_second/* 
+src/pcd_data/testing_data/*
+src/viewpoints_candidate/testing_data/*
+
+!src/pcd_data/testing_data/.gitkeep
+!src/viewpoints_candidate/testing_data/.gitkeep
