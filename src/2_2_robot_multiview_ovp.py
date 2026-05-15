@@ -44,7 +44,7 @@ def init_realsense():
     # 1. Depth Exposure & Gain
     depth_sensor.set_option(rs.option.exposure, 8500) 
     depth_sensor.set_option(rs.option.gain, 16)
-    depth_sensor.set_option(rs.option.enable_auto_exposure, True) 
+    depth_sensor.set_option(rs.option.enable_auto_exposure, False) 
 
     # 2. Color Exposure
     color_sensor.set_option(rs.option.enable_auto_exposure, True)
@@ -63,8 +63,11 @@ def init_realsense():
     intrinsics = profile.get_stream(rs.stream.color).as_video_stream_profile().get_intrinsics()
     depth_scale = depth_sensor.get_depth_scale()
 
+    temporal = rs.temporal_filter()
+    temporal.set_option(rs.option.holes_fill, 7) # default 3
+
     rospy.loginfo(f"RealSense Pipeline Started. Depth Scale: {depth_scale}")
-    return pipeline, align, intrinsics, depth_scale
+    return pipeline, align, temporal, intrinsics, depth_scale
 
 def get_robust_depth(depth_frame, x, y, depth_scale, window_size=5):
     """
@@ -89,7 +92,7 @@ def get_robust_depth(depth_frame, x, y, depth_scale, window_size=5):
         return 0  # No valid depth found
 
 
-def get_yolo_detection(pipeline, align, model, intrinsics, depth_scale):
+def get_yolo_detection(pipeline, align, temporal, model, intrinsics, depth_scale):
     global results
     """Detects object via YOLO OBB and returns camera-space coordinates."""
     print("Waiting for YOLO detection... Press 'q' to confirm.")
@@ -111,6 +114,7 @@ def get_yolo_detection(pipeline, align, model, intrinsics, depth_scale):
             
             # --- Robust Depth Calculation ---
             depth_frame = aligned.get_depth_frame()
+            depth_frame = temporal.process(depth_frame).as_depth_frame()
             dist = get_robust_depth(depth_frame, px, py, depth_scale)
             
             if dist > 0:
@@ -140,7 +144,7 @@ def calculate_look_at_zyz(camera_pos, target_pos):
     return R.from_matrix(rot_matrix).as_euler('zyz', degrees=True)
 
     
-def capture_scan_view(pipeline, align, T_base_camera, index, save_dir="pcd_data", duration=1.0):
+def capture_scan_view(pipeline, align, temporal, T_base_camera, index, save_dir="pcd_data", duration=1.0):
     """
     Captures frames, merges PCD, and saves a side-by-side RGB+Depth visualization.
     Normalization ensures the depth image isn't just a solid blue block.
@@ -163,6 +167,8 @@ def capture_scan_view(pipeline, align, T_base_camera, index, save_dir="pcd_data"
         
         if not depth_frame or not color_frame:
             continue
+            
+        depth_frame = temporal.process(depth_frame).as_depth_frame()
             
         # Store for visualization (most recent frame)
         last_depth_data = np.asanyarray(depth_frame.get_data())
@@ -214,7 +220,7 @@ def capture_scan_view(pipeline, align, T_base_camera, index, save_dir="pcd_data"
     side_by_side = np.hstack((last_color_image, depth_viz))
     
     # Save Image
-    viz_path = os.path.join(save_dir, f"view{index:02d}_viz.png")
+    viz_path = os.path.join(save_dir, f"view{index}_viz.png")
     cv2.imwrite(viz_path, side_by_side)
 
     # --- POINT CLOUD PROCESSING ---
@@ -226,9 +232,9 @@ def capture_scan_view(pipeline, align, T_base_camera, index, save_dir="pcd_data"
     pcd = pcd.voxel_down_sample(voxel_size=2.0)
 
     # Save PCD and TF
-    pcd_path = os.path.join(save_dir, f"view{index:02d}.pcd")
+    pcd_path = os.path.join(save_dir, f"view{index}.pcd")
     o3d.io.write_point_cloud(pcd_path, pcd)
-    np.save(os.path.join(save_dir, f"view{index:02d}_tf.npy"), T_base_camera)
+    np.save(os.path.join(save_dir, f"view{index}_tf.npy"), T_base_camera)
 
     print(f"Saved View {index}: {len(pcd.points)} points. Visualization: {viz_path}")
 
@@ -391,7 +397,7 @@ def home_robot():
 def capture(index=0):
     T_current = get_tf_matrix(tf_buffer, target='base_0', source='realsense_RGBframe')
     time.sleep(1)
-    capture_scan_view(pipeline, align, T_current, index, save_dir=pcd_save_dir, duration=1.0)
+    capture_scan_view(pipeline, align, temporal, T_current, index, save_dir=pcd_save_dir, duration=1.0)
 
 
 def load_viewpoint_poses(folder_path):
@@ -452,19 +458,21 @@ if __name__ == "__main__":
     from DSR_ROBOT import *
 
     # RealSense Initialization
-    pipeline, align, intrinsics, depth_scale = init_realsense()
-    model = YOLO("model/workpiece1_OBB.pt")
+    pipeline, align, temporal, intrinsics, depth_scale = init_realsense()
+    model = YOLO("model/workpiece2_OBB.pt")
 
     pcd_save_dir = r"pcd_data"
     path = r"viewpoints_candidate"
     
     # Detection & Localization
-    obj_cam_pos, obb_angle = get_yolo_detection(pipeline, align, model, intrinsics, depth_scale)
+    obj_cam_pos, obb_angle = get_yolo_detection(pipeline, align, temporal, model, intrinsics, depth_scale)
     T_init = get_tf_matrix(tf_buffer, target='base_0', source='realsense_RGBframe')
     obj_base_pos = (T_init @ np.append(obj_cam_pos, 1))[:3]
     obj_base_pose = [obj_base_pos[0], obj_base_pos[1], obj_base_pos[2], 0.0, obb_angle, 0.0]
     np.save("pcd_data/initial_obj_pose.npy", obj_base_pose)
     
+    print("obb_angle: ", obb_angle)
+
     viewpoint_poses = load_viewpoint_poses(path)
 
     T_link2cam = get_tf_matrix(tf_buffer, source='realsense_RGBframe', target='link6') 
@@ -475,7 +483,7 @@ if __name__ == "__main__":
     T_base2ob_yolo = T_base2cam @ pose_to_matrix(T_cam2ob)
     T_yolo2origin = np.array([[1, 0, 0,  0],
                               [0, 1, 0,  0],
-                              [0, 0, 1, -8],
+                              [0, 0, 1,  0], # -8
                               [0, 0, 0,  1]])
     
     np.save(os.path.join(pcd_save_dir, f"T_base2ob_yolo.npy"), T_base2ob_yolo)
@@ -501,7 +509,7 @@ if __name__ == "__main__":
 
             # Capture and merge from each viewpoint
             T_current = get_tf_matrix(tf_buffer, target='base_0', source='realsense_RGBframe')
-            capture_scan_view(pipeline, align, T_current, i+1, save_dir=pcd_save_dir, duration=1.0)
+            capture_scan_view(pipeline, align, temporal, T_current, i+1, save_dir=pcd_save_dir, duration=1.0)
             time.sleep(0.5)
 
         # Return Home
@@ -509,23 +517,64 @@ if __name__ == "__main__":
         home_robot()    
 
 
+def move_2():
+    """
+    Executes a specific sequence of movements to prevent cable tangling.
+    It groups the viewpoints and returns home between groups.
+    Skips scanning if a viewpoint has already been scanned in this sequence.
+    """
+    sequence_groups = [
+        [0, 1, 0, 3, 2],
+        [4, 5, 4, 7, 6],
+        [8, 11, 8, 9, 10],
+        [12, 13, 14, 15]
+    ]
+
+    scanned_viewpoints = set()
+
+    for group_idx, group in enumerate(sequence_groups):
+        for vp_idx in group:
+            # Skip if the index is out of range for the loaded poses
+            if vp_idx >= len(goal_pose_cam):
+                print(f"Warning: Viewpoint {vp_idx} is out of bounds. Skipping...")
+                continue
+                
+            print(f"Moving to Viewpoint {vp_idx}...")
+            movel(goal_pose_cam[vp_idx], v=75, a=150) # Doosan Move command
+            time.sleep(2) 
+            
+            # Capture and merge from each viewpoint if not already scanned
+            if vp_idx not in scanned_viewpoints:
+                T_current = get_tf_matrix(tf_buffer, target='base_0', source='realsense_RGBframe')
+                capture_scan_view(pipeline, align, temporal, T_current, vp_idx, save_dir=pcd_save_dir, duration=1.0)
+                scanned_viewpoints.add(vp_idx)
+                time.sleep(0.5)
+            else:
+                print(f"Viewpoint {vp_idx} already scanned. Skipping capture.")
+            
+        # Return Home to prevent tangling (except after the last group)
+        if group_idx < len(sequence_groups) - 1:
+            print("Returning Home to prevent cable tangling...")
+            time.sleep(1)
+            home_robot()
+            time.sleep(2)
+            
+    # Return Home at the end
+    print("Sequence complete. Returning Home...")
+    time.sleep(1)
+    home_robot()
+
+
 def move():
+    # Original linear move
     for i in range(len(goal_pose_cam)):
-    # for i in range(0, 3+1):
-    # for i in range(18, 27):
-        # if (i in (4, 10, 18, 28)):
-        #     home_robot()
-        #     time.sleep(3)
         print(f"Moving to Viewpoint {i}...")
         movel(goal_pose_cam[i], v=75, a=150) # Doosan Move command
         time.sleep(2) 
         # Capture and merge from each viewpoint
         T_current = get_tf_matrix(tf_buffer, target='base_0', source='realsense_RGBframe')
-        capture_scan_view(pipeline, align, T_current, i, save_dir=pcd_save_dir, duration=1.0)
+        capture_scan_view(pipeline, align, temporal, T_current, i, save_dir=pcd_save_dir, duration=1.0)
         time.sleep(0.5)
     # Return Home
     time.sleep(1)
-    home_robot()     
-
-
-
+    home_robot()
