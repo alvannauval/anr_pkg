@@ -15,7 +15,10 @@ testing/
 src/analyze/
 
 src/pcd_data/testing_data/*
+src/processed_data/*
 src/viewpoints_candidate/testing_data/*
 
 !src/pcd_data/testing_data/.gitkeep
 !src/viewpoints_candidate/testing_data/.gitkeep
+!src/processed_data/.gitkeep
+
