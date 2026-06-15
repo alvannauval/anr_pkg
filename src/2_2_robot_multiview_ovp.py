@@ -92,7 +92,7 @@ def get_robust_depth(depth_frame, x, y, depth_scale, window_size=5):
         return 0  # No valid depth found
 
 
-def get_yolo_detection(pipeline, align, temporal, model, intrinsics, depth_scale):
+def get_yolo_detection(pipeline, align, temporal, model, intrinsics, depth_scale, target_class=None):
     global results
     """Detects object via YOLO OBB and returns camera-space coordinates."""
     print("Waiting for YOLO detection... Press 'q' to confirm.")
@@ -106,10 +106,21 @@ def get_yolo_detection(pipeline, align, temporal, model, intrinsics, depth_scale
         else:
             print("Failed to align frames.")
         
-        results = model(color_img, conf=0.88)
+        results = model(color_img, conf=0.5)
         if results[0].obb is not None and len(results[0].obb) > 0:
-            # results[0].obb is sorted by confidence; index 0 is the best
-            box = results[0].obb[0]
+            if target_class is not None:
+                classes = results[0].obb.cls.cpu().numpy()
+                confs = results[0].obb.conf.cpu().numpy()
+                valid_indices = np.where(classes == target_class)[0]
+                if len(valid_indices) == 0:
+                    print(f"Searching for the object (Class {target_class} not found)")
+                    continue
+                best_idx = valid_indices[np.argmax(confs[valid_indices])]
+                box = results[0].obb[best_idx]
+            else:
+                # results[0].obb is sorted by confidence; index 0 is the best
+                box = results[0].obb[0]
+                
             px, py, _, _, rotation = box.xywhr.cpu().numpy()[0]
             
             # --- Robust Depth Calculation ---
@@ -122,9 +133,14 @@ def get_yolo_detection(pipeline, align, temporal, model, intrinsics, depth_scale
                 cv_frame = results[0].plot()
                 cv2.circle(cv_frame, (int(px), int(py)), 5, (0, 0, 255), -1)
                 cv2.imshow("Detection (Press q)", cv_frame)
-                if cv2.waitKey(1) & 0xFF == ord('q'):
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q'):
                     cv2.destroyAllWindows()
-                    return [c * 1000 for c in cam_pts], np.degrees(results[0].obb[0].xywhr.cpu().numpy()[0][4])
+                    return [c * 1000 for c in cam_pts], np.degrees(box.xywhr.cpu().numpy()[0][4])
+                elif key == 27: # ESC key
+                    cv2.destroyAllWindows()
+                    print("Process cancelled by user.")
+                    sys.exit(0)
                 
         else:
             print("Searching for the object")
@@ -441,7 +457,10 @@ def get_robot_pose_api():
     # get_current_posx() is part of the DSR_ROBOT module
     pos = get_current_posx() 
     if pos:
-        return pos # This is a list of 6 floats
+        # Doosan API sometimes returns a tuple (posx, sol_space)
+        if isinstance(pos, tuple):
+            return list(pos[0])
+        return list(pos)
     return None
 
 if __name__ == "__main__":
@@ -464,10 +483,62 @@ if __name__ == "__main__":
     pcd_save_dir = r"pcd_data"
     path = r"viewpoints_candidate"
     
+    # Configuration
+    ENABLE_RECENTER = True
+    TARGET_CLASS = None  # Set to None if no specific class filtering is needed
+
     # Detection & Localization
-    obj_cam_pos, obb_angle = get_yolo_detection(pipeline, align, temporal, model, intrinsics, depth_scale)
+    obj_cam_pos, obb_angle = get_yolo_detection(pipeline, align, temporal, model, intrinsics, depth_scale, target_class=TARGET_CLASS)
     T_init = get_tf_matrix(tf_buffer, target='base_0', source='realsense_RGBframe')
     obj_base_pos = (T_init @ np.append(obj_cam_pos, 1))[:3]
+    
+    if ENABLE_RECENTER:
+        print("Recentering robot to the workpiece...")
+        
+        # 1. Start with the current camera pose in base frame
+        T_des_cam = np.copy(T_init)
+        
+        # 2. Update X and Y to match the object's base position
+        T_des_cam[0, 3] = obj_base_pos[0]
+        T_des_cam[1, 3] = obj_base_pos[1]
+        
+        # 3. Add yaw rotation based on YOLO obb_angle around the camera's local Z-axis
+        rad = np.radians(obb_angle)
+        Rz = np.array([
+            [np.cos(rad), -np.sin(rad), 0, 0],
+            [np.sin(rad),  np.cos(rad), 0, 0],
+            [0,            0,           1, 0],
+            [0,            0,           0, 1]
+        ])
+        T_des_cam = T_des_cam @ Rz
+        
+        # 4. Compute exactly where link6 needs to be to center the rotated camera
+        T_link2cam_local = get_tf_matrix(tf_buffer, source='realsense_RGBframe', target='link6')
+        T_des_link = T_des_cam @ np.linalg.inv(T_link2cam_local)
+        
+        # 5. Apply the safe movement keeping Z, Roll, Pitch locked
+        current_pose = get_robot_pose_api()
+        if current_pose:
+            new_pose = list(current_pose)
+            
+            # Update X and Y to center the camera
+            new_pose[0] = T_des_link[0, 3]
+            new_pose[1] = T_des_link[1, 3]
+            
+            # Explicitly lock Z so it cannot move up or down
+            new_pose[2] = current_pose[2]
+            
+            # Add the yaw rotation directly to the robot's C angle
+            new_pose[5] += obb_angle
+            
+            movel(new_pose, v=100, a=200)
+            time.sleep(1.0)
+            
+            print("Performing secondary scan after recentering...")
+            obj_cam_pos, obb_angle = get_yolo_detection(pipeline, align, temporal, model, intrinsics, depth_scale, target_class=TARGET_CLASS)
+            T_init = get_tf_matrix(tf_buffer, target='base_0', source='realsense_RGBframe')
+            obj_base_pos = (T_init @ np.append(obj_cam_pos, 1))[:3]
+
     obj_base_pose = [obj_base_pos[0], obj_base_pos[1], obj_base_pos[2], 0.0, obb_angle, 0.0]
     np.save("pcd_data/initial_obj_pose.npy", obj_base_pose)
     
