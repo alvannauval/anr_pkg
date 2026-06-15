@@ -103,7 +103,7 @@ def get_yolo_detection(rs_manager, model, target_class=None):
     while not rospy.is_shutdown():
         color_img, depth_img = rs_manager.wait_for_frames()
         
-        results = model(color_img, conf=0.5)
+        results = model(color_img, conf=0.9)
         if results[0].obb is not None and len(results[0].obb) > 0:
             if target_class is not None:
                 classes = results[0].obb.cls.cpu().numpy()
@@ -160,10 +160,11 @@ def calculate_look_at_zyz(camera_pos, target_pos):
     return R.from_matrix(rot_matrix).as_euler('zyz', degrees=True)
 
     
-def capture_scan_view(rs_manager, T_base_camera, index, save_dir="pcd_data", duration=1.0):
+def capture_scan_view(rs_manager, T_base_camera, index, save_dir="pcd_data", duration=1.0, bbox_center=None, bbox_size=(150, 150, 200)):
     """
     Captures frames, merges PCD, and saves a side-by-side RGB+Depth visualization.
     Normalization ensures the depth image isn't just a solid blue block.
+    If bbox_center is provided, it crops the point cloud to the 3D bounding box before merging.
     """    
     all_points = []
     last_color_image = None
@@ -208,7 +209,20 @@ def capture_scan_view(rs_manager, T_base_camera, index, save_dir="pcd_data", dur
         # 2. Transform to Base Frame
         # T_base_camera must be the 4x4 matrix from important_2 logic
         verts_base = (T_base_camera @ np.c_[verts, np.ones(len(verts))].T).T[:, :3]
-        all_points.append(verts_base)
+        
+        # 3. Crop to Bounding Box
+        if bbox_center is not None:
+            bx, by, bz = bbox_center
+            sx, sy, sz = bbox_size
+            mask = (
+                (verts_base[:, 0] >= bx - sx/2) & (verts_base[:, 0] <= bx + sx/2) &
+                (verts_base[:, 1] >= by - sy/2) & (verts_base[:, 1] <= by + sy/2) &
+                (verts_base[:, 2] >= bz - sz/2) & (verts_base[:, 2] <= bz + sz/2)
+            )
+            verts_base = verts_base[mask]
+
+        if len(verts_base) > 0:
+            all_points.append(verts_base)
 
     if len(all_points) == 0:
         print("Error: No data captured!")
@@ -418,7 +432,7 @@ def home_robot():
 def capture(index=0):
     T_current = get_tf_matrix(tf_buffer, target='base_0', source='realsense_RGBframe')
     time.sleep(1)
-    capture_scan_view(rs_manager, T_current, index, save_dir=pcd_save_dir, duration=1.0)
+    capture_scan_view(rs_manager, T_current, index, save_dir=pcd_save_dir, duration=1.0, bbox_center=obj_base_pos)
 
 
 def load_viewpoint_poses(folder_path):
@@ -483,7 +497,7 @@ if __name__ == "__main__":
 
     # RealSense Initialization
     rs_manager = RealSenseROSManager()
-    model = YOLO("model/workpiece2_OBB.pt")
+    model = YOLO("model/workpiece1_OBB.pt")
 
     pcd_save_dir = r"pcd_data"
     path = r"viewpoints_candidate"
@@ -585,7 +599,7 @@ if __name__ == "__main__":
 
             # Capture and merge from each viewpoint
             T_current = get_tf_matrix(tf_buffer, target='base_0', source='realsense_RGBframe')
-            capture_scan_view(rs_manager, T_current, i+1, save_dir=pcd_save_dir, duration=1.0)
+            capture_scan_view(rs_manager, T_current, i+1, save_dir=pcd_save_dir, duration=1.0, bbox_center=obj_base_pos)
             time.sleep(0.5)
 
         # Return Home
@@ -622,7 +636,7 @@ def move_2():
             # Capture and merge from each viewpoint if not already scanned
             if vp_idx not in scanned_viewpoints:
                 T_current = get_tf_matrix(tf_buffer, target='base_0', source='realsense_RGBframe')
-                capture_scan_view(rs_manager, T_current, vp_idx, save_dir=pcd_save_dir, duration=1.0)
+                capture_scan_view(rs_manager, T_current, vp_idx, save_dir=pcd_save_dir, duration=1.0, bbox_center=obj_base_pos)
                 scanned_viewpoints.add(vp_idx)
                 time.sleep(0.5)
             else:
@@ -649,9 +663,39 @@ def move():
         time.sleep(2) 
         # Capture and merge from each viewpoint
         T_current = get_tf_matrix(tf_buffer, target='base_0', source='realsense_RGBframe')
-        capture_scan_view(rs_manager, T_current, i, save_dir=pcd_save_dir, duration=1.0)
+        capture_scan_view(rs_manager, T_current, i, save_dir=pcd_save_dir, duration=1.0, bbox_center=obj_base_pos)
         time.sleep(0.5)
     # Return Home
+    time.sleep(1)
+    home_robot()
+
+
+def move_3():
+    """
+    Executes scanning only for viewpoints corresponding to 0, 30, 60, and 90 degrees azimuth.
+    Since the maximum rotation is 90 degrees, no unwinding logic is needed.
+    """
+    viewpoints_per_angle = 12
+    total_poses = len(goal_pose_cam)
+    num_angles = total_poses // viewpoints_per_angle
+    # Collect all indices that correspond to 0, 30, 60, and 90 degrees (offsets 0, 1, 2, 3)
+    target_indices = []
+    for i in range(num_angles):
+        base_idx = i * viewpoints_per_angle
+        target_indices.extend([base_idx, base_idx + 1, base_idx + 2, base_idx + 3])
+    for vp_idx in target_indices:
+        if vp_idx >= len(goal_pose_cam):
+            print(f"Warning: Viewpoint {vp_idx} is out of bounds. Skipping...")
+            continue
+        print(f"Moving to Viewpoint {vp_idx} (0-90 deg sweep)...")
+        movel(goal_pose_cam[vp_idx], v=75, a=150) # Doosan Move command
+        time.sleep(2) 
+        # Capture and merge
+        T_current = get_tf_matrix(tf_buffer, target='base_0', source='realsense_RGBframe')
+        capture_scan_view(rs_manager, T_current, vp_idx, save_dir=pcd_save_dir, duration=1.0, bbox_center=obj_base_pos)
+        time.sleep(0.5)
+    # Return Home at the end
+    print("Sequence complete. Returning Home...")
     time.sleep(1)
     home_robot()
 
