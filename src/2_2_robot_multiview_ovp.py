@@ -9,7 +9,12 @@ import cv2
 import re
 import numpy as np
 import open3d as o3d
-import pyrealsense2 as rs
+import rospy
+import tf
+import tf2_ros
+import message_filters
+from sensor_msgs.msg import Image, CameraInfo
+from cv_bridge import CvBridge
 import rospy
 import tf
 import tf2_ros
@@ -25,55 +30,48 @@ def init_robot(robot_id="dsr01", model="m1013"):
     rospy.loginfo(f"Robot {robot_id} ({model}) initialized.")
 
 
-def init_realsense():
-    """Starts the RealSense pipeline with parameters from official roslaunch."""
-    pipeline = rs.pipeline()
-    config = rs.config()
-    
-    # Matching ROS default resolution/fps
-    config.enable_stream(rs.stream.color, 848, 480, rs.format.bgr8, 30)
-    config.enable_stream(rs.stream.depth, 848, 480, rs.format.z16, 30)
+class RealSenseROSManager:
+    def __init__(self):
+        self.bridge = CvBridge()
+        self.latest_color = None
+        self.latest_depth = None
+        self.camera_info = None
+        
+        # Subscribe to Camera Info once to get intrinsics
+        rospy.loginfo("Waiting for camera info...")
+        self.camera_info = rospy.wait_for_message("/camera/color/camera_info", CameraInfo)
+        rospy.loginfo("Camera info received.")
 
-    profile = pipeline.start(config)
-    
-    # Get sensors
-    dev = profile.get_device()
-    depth_sensor = dev.first_depth_sensor()
-    color_sensor = dev.query_sensors()[1] # Usually index 1 for color
+        # Set up synchronized subscribers
+        self.color_sub = message_filters.Subscriber("/camera/color/image_raw", Image)
+        self.depth_sub = message_filters.Subscriber("/camera/aligned_depth_to_color/image_raw", Image)
+        
+        self.ts = message_filters.ApproximateTimeSynchronizer([self.color_sub, self.depth_sub], queue_size=10, slop=0.1)
+        self.ts.registerCallback(self.sync_callback)
 
-    # 1. Depth Exposure & Gain
-    depth_sensor.set_option(rs.option.exposure, 8500) 
-    depth_sensor.set_option(rs.option.gain, 16)
-    depth_sensor.set_option(rs.option.enable_auto_exposure, False) 
+    def sync_callback(self, color_msg, depth_msg):
+        try:
+            self.latest_color = self.bridge.imgmsg_to_cv2(color_msg, "bgr8")
+            # Usually aligned depth is 16UC1 in mm
+            self.latest_depth = self.bridge.imgmsg_to_cv2(depth_msg, "16UC1")
+        except Exception as e:
+            rospy.logerr(f"CV Bridge error: {e}")
 
-    # 2. Color Exposure
-    color_sensor.set_option(rs.option.enable_auto_exposure, True)
+    def wait_for_frames(self):
+        """Wait until a new synchronized pair of frames is available."""
+        self.latest_color = None
+        self.latest_depth = None
+        while not rospy.is_shutdown() and (self.latest_color is None or self.latest_depth is None):
+            rospy.sleep(0.01)
+        return self.latest_color, self.latest_depth
 
-    # 3. Laser Projector
-    # This ensures uses its IR pattern
-    if depth_sensor.supports(rs.option.emitter_enabled):
-        depth_sensor.set_option(rs.option.emitter_enabled, 1) # 1 is On
 
-    # 4. Visual Preset
-    # (1 = Default | 3 = High Accuracy | 4 = High Density | 5 = Medium Density)
-    depth_sensor.set_option(rs.option.visual_preset, 5)
-
-    # --- EXISTING LOGIC ---
-    align = rs.align(rs.stream.color)
-    intrinsics = profile.get_stream(rs.stream.color).as_video_stream_profile().get_intrinsics()
-    depth_scale = depth_sensor.get_depth_scale()
-
-    temporal = rs.temporal_filter()
-    temporal.set_option(rs.option.holes_fill, 7) # default 3
-
-    rospy.loginfo(f"RealSense Pipeline Started. Depth Scale: {depth_scale}")
-    return pipeline, align, temporal, intrinsics, depth_scale
-
-def get_robust_depth(depth_frame, x, y, depth_scale, window_size=5):
+def get_robust_depth(depth_data, x, y, window_size=5):
     """
     Calculates the average depth in a window around (x, y) to avoid noise.
+    depth_data is assumed to be in millimeters (16UC1).
+    Returns depth in meters.
     """
-    depth_data = np.asanyarray(depth_frame.get_data())
     half_w = window_size // 2
     
     # Define the bounding box for the window (ROI)
@@ -87,24 +85,23 @@ def get_robust_depth(depth_frame, x, y, depth_scale, window_size=5):
     
     if len(valid_depths) > 0:
         # Return mean depth converted to meters
-        return np.mean(valid_depths) * depth_scale
+        return np.mean(valid_depths) * 0.001
     else:
         return 0  # No valid depth found
 
 
-def get_yolo_detection(pipeline, align, temporal, model, intrinsics, depth_scale, target_class=None):
+def get_yolo_detection(rs_manager, model, target_class=None):
     global results
     """Detects object via YOLO OBB and returns camera-space coordinates."""
     print("Waiting for YOLO detection... Press 'q' to confirm.")
+    
+    cx = rs_manager.camera_info.K[2]
+    cy = rs_manager.camera_info.K[5]
+    fx = rs_manager.camera_info.K[0]
+    fy = rs_manager.camera_info.K[4]
+    
     while not rospy.is_shutdown():
-        frames = pipeline.wait_for_frames()
-        aligned = align.process(frames)
-        color_img = np.asanyarray(aligned.get_color_frame().get_data())
-
-        if aligned:
-            print("Frames aligned successfully.")
-        else:
-            print("Failed to align frames.")
+        color_img, depth_img = rs_manager.wait_for_frames()
         
         results = model(color_img, conf=0.5)
         if results[0].obb is not None and len(results[0].obb) > 0:
@@ -124,12 +121,15 @@ def get_yolo_detection(pipeline, align, temporal, model, intrinsics, depth_scale
             px, py, _, _, rotation = box.xywhr.cpu().numpy()[0]
             
             # --- Robust Depth Calculation ---
-            depth_frame = aligned.get_depth_frame()
-            depth_frame = temporal.process(depth_frame).as_depth_frame()
-            dist = get_robust_depth(depth_frame, px, py, depth_scale)
+            # Temporal filtering is handled by the ROS node natively.
+            dist = get_robust_depth(depth_img, px, py)
             
             if dist > 0:
-                cam_pts = rs.rs2_deproject_pixel_to_point(intrinsics, [px, py], dist)
+                X = (px - cx) * dist / fx
+                Y = (py - cy) * dist / fy
+                Z = dist
+                cam_pts = [X, Y, Z]
+                
                 cv_frame = results[0].plot()
                 cv2.circle(cv_frame, (int(px), int(py)), 5, (0, 0, 255), -1)
                 cv2.imshow("Detection (Press q)", cv_frame)
@@ -160,7 +160,7 @@ def calculate_look_at_zyz(camera_pos, target_pos):
     return R.from_matrix(rot_matrix).as_euler('zyz', degrees=True)
 
     
-def capture_scan_view(pipeline, align, temporal, T_base_camera, index, save_dir="pcd_data", duration=1.0):
+def capture_scan_view(rs_manager, T_base_camera, index, save_dir="pcd_data", duration=1.0):
     """
     Captures frames, merges PCD, and saves a side-by-side RGB+Depth visualization.
     Normalization ensures the depth image isn't just a solid blue block.
@@ -171,34 +171,39 @@ def capture_scan_view(pipeline, align, temporal, T_base_camera, index, save_dir=
     start_time = time.time()
     count = 0
     
+    cx = rs_manager.camera_info.K[2]
+    cy = rs_manager.camera_info.K[5]
+    fx = rs_manager.camera_info.K[0]
+    fy = rs_manager.camera_info.K[4]
+    
     print(f"Scanning Viewpoint {index} for {duration}s...")
 
     while (time.time() - start_time) < duration:
         count += 1
-        frames = pipeline.wait_for_frames()
-        aligned_frames = align.process(frames)
-
-        depth_frame = aligned_frames.get_depth_frame()
-        color_frame = aligned_frames.get_color_frame()
-        
-        if not depth_frame or not color_frame:
-            continue
-            
-        depth_frame = temporal.process(depth_frame).as_depth_frame()
+        color_img, depth_img = rs_manager.wait_for_frames()
             
         # Store for visualization (most recent frame)
-        last_depth_data = np.asanyarray(depth_frame.get_data())
-        last_color_image = np.asanyarray(color_frame.get_data())
+        last_depth_data = depth_img
+        last_color_image = color_img
 
-        # Logic to reduce point density: process every 5th frame
-        if count % 5 != 0:
+        # Logic to reduce point density: process every 2nd frame (prev 5)
+        if count % 2 != 0:
             continue 
 
-        # 1. Calculate Point Cloud
-        pc = rs.pointcloud()
-        points = pc.calculate(depth_frame)
-        # Convert to mm
-        verts = np.asanyarray(points.get_vertices()).view(np.float32).reshape(-1, 3) * 1000.0
+        # 1. Calculate Point Cloud (Vectorized)
+        H, W = depth_img.shape
+        u, v = np.meshgrid(np.arange(W), np.arange(H))
+        
+        # valid depth is > 0
+        valid = depth_img > 0
+        z = depth_img[valid] * 0.001 # convert mm to meters for xyz calculation
+        u = u[valid]
+        v = v[valid]
+        
+        x = (u - cx) * z / fx
+        y = (v - cy) * z / fy
+        
+        verts = np.stack((x, y, z), axis=-1) * 1000.0 # Convert back to mm for processing
         
         # 2. Transform to Base Frame
         # T_base_camera must be the 4x4 matrix from important_2 logic
@@ -245,7 +250,7 @@ def capture_scan_view(pipeline, align, temporal, T_base_camera, index, save_dir=
     pcd.points = o3d.utility.Vector3dVector(merged_verts)
     
     # Voxel downsampling (2mm)
-    pcd = pcd.voxel_down_sample(voxel_size=2.0)
+    pcd = pcd.voxel_down_sample(voxel_size=0.5) # at 350 mm working distance, the object resolution is 0.52 mm
 
     # Save PCD and TF
     pcd_path = os.path.join(save_dir, f"view{index}.pcd")
@@ -413,7 +418,7 @@ def home_robot():
 def capture(index=0):
     T_current = get_tf_matrix(tf_buffer, target='base_0', source='realsense_RGBframe')
     time.sleep(1)
-    capture_scan_view(pipeline, align, temporal, T_current, index, save_dir=pcd_save_dir, duration=1.0)
+    capture_scan_view(rs_manager, T_current, index, save_dir=pcd_save_dir, duration=1.0)
 
 
 def load_viewpoint_poses(folder_path):
@@ -477,18 +482,18 @@ if __name__ == "__main__":
     from DSR_ROBOT import *
 
     # RealSense Initialization
-    pipeline, align, temporal, intrinsics, depth_scale = init_realsense()
+    rs_manager = RealSenseROSManager()
     model = YOLO("model/workpiece2_OBB.pt")
 
     pcd_save_dir = r"pcd_data"
     path = r"viewpoints_candidate"
     
     # Configuration
-    ENABLE_RECENTER = True
+    ENABLE_RECENTER = False
     TARGET_CLASS = None  # Set to None if no specific class filtering is needed
 
     # Detection & Localization
-    obj_cam_pos, obb_angle = get_yolo_detection(pipeline, align, temporal, model, intrinsics, depth_scale, target_class=TARGET_CLASS)
+    obj_cam_pos, obb_angle = get_yolo_detection(rs_manager, model, target_class=TARGET_CLASS)
     T_init = get_tf_matrix(tf_buffer, target='base_0', source='realsense_RGBframe')
     obj_base_pos = (T_init @ np.append(obj_cam_pos, 1))[:3]
     
@@ -535,7 +540,7 @@ if __name__ == "__main__":
             time.sleep(1.0)
             
             print("Performing secondary scan after recentering...")
-            obj_cam_pos, obb_angle = get_yolo_detection(pipeline, align, temporal, model, intrinsics, depth_scale, target_class=TARGET_CLASS)
+            obj_cam_pos, obb_angle = get_yolo_detection(rs_manager, model, target_class=TARGET_CLASS)
             T_init = get_tf_matrix(tf_buffer, target='base_0', source='realsense_RGBframe')
             obj_base_pos = (T_init @ np.append(obj_cam_pos, 1))[:3]
 
@@ -580,7 +585,7 @@ if __name__ == "__main__":
 
             # Capture and merge from each viewpoint
             T_current = get_tf_matrix(tf_buffer, target='base_0', source='realsense_RGBframe')
-            capture_scan_view(pipeline, align, temporal, T_current, i+1, save_dir=pcd_save_dir, duration=1.0)
+            capture_scan_view(rs_manager, T_current, i+1, save_dir=pcd_save_dir, duration=1.0)
             time.sleep(0.5)
 
         # Return Home
@@ -617,7 +622,7 @@ def move_2():
             # Capture and merge from each viewpoint if not already scanned
             if vp_idx not in scanned_viewpoints:
                 T_current = get_tf_matrix(tf_buffer, target='base_0', source='realsense_RGBframe')
-                capture_scan_view(pipeline, align, temporal, T_current, vp_idx, save_dir=pcd_save_dir, duration=1.0)
+                capture_scan_view(rs_manager, T_current, vp_idx, save_dir=pcd_save_dir, duration=1.0)
                 scanned_viewpoints.add(vp_idx)
                 time.sleep(0.5)
             else:
@@ -644,8 +649,14 @@ def move():
         time.sleep(2) 
         # Capture and merge from each viewpoint
         T_current = get_tf_matrix(tf_buffer, target='base_0', source='realsense_RGBframe')
-        capture_scan_view(pipeline, align, temporal, T_current, i, save_dir=pcd_save_dir, duration=1.0)
+        capture_scan_view(rs_manager, T_current, i, save_dir=pcd_save_dir, duration=1.0)
         time.sleep(0.5)
     # Return Home
     time.sleep(1)
     home_robot()
+
+
+def test(posx=0,posy=0,posz=0):
+    movel([558.9803466796875+posx, 37.472660064697266+posy, 411.4325256347656+posz, 7.729799270629883, -179.99227905273438, 7.732522964477539], v=100, a=200)
+    time.sleep(1)
+    
