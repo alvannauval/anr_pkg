@@ -50,12 +50,21 @@ To generate the dataset from scratch and train the model, execute the following 
   - Extracts the targeted surfaces (e.g., `surface0`, `surface1`) from the full point clouds.
   - Calculates the Chamfer Distance between the noisy crop and the perfect crop.
   - Exports the **Perfect CAD crops** (`viewpoint_simulated_X_surfaceY.pcd`) to the `processed_data/` directory.
-  - Saves the mapping between the exported filenames and the Chamfer Distances into `metadata.csv`.
+  - Saves the mapping between the exported filenames and the Chamfer Distances into `metadata.csv` (using lowercase `filename`).
 - **NOTE**: 216 Viewpoints * 6 Workpieces * 2 Surface = 2592 Samples takes around 3 minutes.
+- **Visualization**: The final cell allows you to interactively compare the Noisy Simulated Intersect (Blue) against the Perfect Simulated Intersect (Green) to visually understand the physical noise.
 
-### Phase 5: Model Training and Validation
-**Notebook**: `testing.ipynb` (located in `pointnet_pytorch_reflective/`)
+### Phase 5: Model Training (Mixture of Experts)
+**Notebook**: `1_training.ipynb` (located in `pointnet_pytorch_reflective/`)
 - **Purpose**: Ingests the `metadata.csv` dataset and trains the PointNet Regression Model.
 - **Action**:
-  - **Cell 1 (Visualization)**: Allows you to interactively visualize the generated feature crops. Window 1 shows the Perfect CAD feature colored by Angle of Incidence (what the network sees). Window 2 shows the full noisy scan context.
-  - **Cell 2 (Training)**: The dataloader reads `metadata.csv`, parses the file paths, and dynamically splits the dataset into Train/Validation/Test sets based on Workpiece IDs (e.g., holding out `TH0021AV` and `TH0032AV` for testing). It then applies a `WeightedRandomSampler` to balance the regression targets and begins the AdamW optimization loop.
+  - **Cell 1 (Visualization)**: Allows you to interactively visualize the generated feature crops. Window 1 shows the exact cropped Perfect CAD feature colored by Angle of Incidence (what the network sees). Window 2 shows the full noisy scan context.
+  - **Cell 2 (Training)**: The dataloader reads `metadata.csv`. To solve variance imbalance / Simpson's paradox, we utilize a **Mixture of Experts** approach by filtering the dataset using `TARGET_SURFACE_FILTER` to train isolated networks for specific feature geometries (e.g., flat surface vs pocket). It applies a `WeightedRandomSampler` to balance regression targets, extracts Angle of Incidence, normalizes spatially, and begins the AdamW optimization loop.
+
+### Phase 6: Inference & Analytics
+**Notebook**: `2_inference.ipynb` (located in `pointnet_pytorch_reflective/`)
+- **Purpose**: Evaluates the trained PointNet expert models and visualizes predictive accuracy.
+- **Action**:
+  - Runs the trained `.pth` model against testing data to generate `inference_results.csv`.
+  - **Histogram Analysis**: Plots the Chamfer Value distribution with clear ±1σ Standard Deviation markers.
+  - **Parity Plots**: Plots Ground Truth Chamfer Distance vs Predicted Chamfer Distance, complete with best-fit linear regression lines. Supports filtering by surface or visualizing multiple workpieces simultaneously (`TARGET_WORKPIECES` list).
