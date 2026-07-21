@@ -68,3 +68,14 @@ To generate the dataset from scratch and train the model, execute the following 
   - Runs the trained `.pth` model against testing data to generate `inference_results.csv`.
   - **Histogram Analysis**: Plots the Chamfer Value distribution with clear ±1σ Standard Deviation markers.
   - **Parity Plots**: Plots Ground Truth Chamfer Distance vs Predicted Chamfer Distance, complete with best-fit linear regression lines. Supports filtering by surface or visualizing multiple workpieces simultaneously (`TARGET_WORKPIECES` list).
+
+
+### Phase 7: Viewpoint Optimization (Next Best View)
+**Notebook**: 7_optimization.ipynb
+- **Purpose**: Uses the PointNet++ predictions to plan the optimal sequence of robotic camera viewpoints.
+- **Action**:
+  - **Data Ingestion**: Loads the predicted Chamfer Distances for each feature from Phase 6.
+  - **Point-Weighted Averaging**: Converts individual feature errors into a true point-weighted average Chamfer Distance for every camera viewpoint.
+  - **Dynamic Filtering**: Applies a dynamic Top-20% filter based on a combined score of (Coverage Ratio × Normalized Confidence) to automatically eliminate poor viewpoints.
+  - **MOOP Algorithm**: Executes a Multi-Objective Optimization Problem (MOOP) using a GRASP algorithm (Greedy Randomized Adaptive Search Procedure). The optimizer balances Information Gain (submodular marginal coverability) against Confidence (predictive accuracy) to find the absolute best sequence of viewpoints.
+  - **Manual Evaluation**: Contains a Reverse Engineering block to compare the physical error of manually selected camera grids against the GRASP-optimized sequence.
