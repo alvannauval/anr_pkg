@@ -95,6 +95,14 @@ def get_yolo_detection(rs_manager, model, target_class=None):
     """Detects object via YOLO OBB and returns camera-space coordinates."""
     print("Waiting for YOLO detection... Press 'q' to confirm.")
     
+    # If target_class is provided as a string (e.g., "workpiece"), find its integer ID
+    if isinstance(target_class, str):
+        found_class = next((k for k, v in model.names.items() if v.lower() == target_class.lower()), None)
+        if found_class is None:
+            print(f"Error: Class '{target_class}' not found in the model. Available: {model.names}")
+            return None, None
+        target_class = found_class
+    
     cx = rs_manager.camera_info.K[2]
     cy = rs_manager.camera_info.K[5]
     fx = rs_manager.camera_info.K[0]
@@ -103,20 +111,16 @@ def get_yolo_detection(rs_manager, model, target_class=None):
     while not rospy.is_shutdown():
         color_img, depth_img = rs_manager.wait_for_frames()
         
-        results = model(color_img, conf=0.9)
+        # By passing classes=[target_class], YOLO strictly ignores all other objects
+        if target_class is not None:
+            results = model(color_img, conf=0.7, classes=[target_class])
+        else:
+            results = model(color_img, conf=0.7)
+            
         if results[0].obb is not None and len(results[0].obb) > 0:
-            if target_class is not None:
-                classes = results[0].obb.cls.cpu().numpy()
-                confs = results[0].obb.conf.cpu().numpy()
-                valid_indices = np.where(classes == target_class)[0]
-                if len(valid_indices) == 0:
-                    print(f"Searching for the object (Class {target_class} not found)")
-                    continue
-                best_idx = valid_indices[np.argmax(confs[valid_indices])]
-                box = results[0].obb[best_idx]
-            else:
-                # results[0].obb is sorted by confidence; index 0 is the best
-                box = results[0].obb[0]
+            # Since YOLO already filtered out everything else, index 0 is guaranteed
+            # to be the highest confidence detection of your target_class
+            box = results[0].obb[0]
                 
             px, py, _, _, rotation = box.xywhr.cpu().numpy()[0]
             
@@ -498,13 +502,14 @@ if __name__ == "__main__":
     # RealSense Initialization
     rs_manager = RealSenseROSManager()
     model = YOLO("model/workpiece1_OBB.pt")
+    # model = YOLO("/home/smslab/catkin_ws/src/seongin/src/yolo11_log/yolo11x_S256_bs32_ep100/weights/best.pt")
 
     pcd_save_dir = r"pcd_data"
     path = r"viewpoints_candidate"
     
     # Configuration
-    ENABLE_RECENTER = False
-    TARGET_CLASS = None  # Set to None if no specific class filtering is needed
+    ENABLE_RECENTER = True
+    TARGET_CLASS = 'Up'  # Set to None if no specific class filtering is needed
 
     # Detection & Localization
     obj_cam_pos, obb_angle = get_yolo_detection(rs_manager, model, target_class=TARGET_CLASS)
@@ -573,7 +578,7 @@ if __name__ == "__main__":
     T_base2ob_yolo = T_base2cam @ pose_to_matrix(T_cam2ob)
     T_yolo2origin = np.array([[1, 0, 0,  0],
                               [0, 1, 0,  0],
-                              [0, 0, 1,  0], # -8
+                              [0, 0, 1,  -4.8], # -8
                               [0, 0, 0,  1]])
     
     np.save(os.path.join(pcd_save_dir, f"T_base2ob_yolo.npy"), T_base2ob_yolo)
@@ -614,10 +619,9 @@ def move_2():
     Skips scanning if a viewpoint has already been scanned in this sequence.
     """
     sequence_groups = [
-        [0, 1, 0, 3, 2],
-        [4, 5, 4, 7, 6],
-        [8, 11, 8, 9, 10],
-        [12, 13, 14, 15]
+        [7, 0, 1, 2, 3, 4, 5, 6],
+        [15, 8, 9, 10, 11, 12, 13, 14],
+        [23, 16, 17, 18, 19, 20, 21, 22]
     ]
 
     scanned_viewpoints = set()
