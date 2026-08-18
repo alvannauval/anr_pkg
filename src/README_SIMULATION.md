@@ -72,10 +72,22 @@ To generate the dataset from scratch and train the model, execute the following 
 
 ### Phase 7: Viewpoint Optimization (Next Best View)
 **Notebook**: 7_optimization.ipynb
-- **Purpose**: Uses the PointNet++ predictions to plan the optimal sequence of robotic camera viewpoints.
+- **Purpose**: Uses predicted (or Ground Truth) Chamfer Distances and geometric coverage data to plan the mathematically optimal sequence of robotic camera viewpoints.
 - **Action**:
-  - **Data Ingestion**: Loads the predicted Chamfer Distances for each feature from Phase 6.
-  - **Point-Weighted Averaging**: Converts individual feature errors into a true point-weighted average Chamfer Distance for every camera viewpoint.
-  - **Dynamic Filtering**: Applies a dynamic Top-20% filter based on a combined score of (Coverage Ratio × Normalized Confidence) to automatically eliminate poor viewpoints.
-  - **MOOP Algorithm**: Executes a Multi-Objective Optimization Problem (MOOP) using a GRASP algorithm (Greedy Randomized Adaptive Search Procedure). The optimizer balances Information Gain (submodular marginal coverability) against Confidence (predictive accuracy) to find the absolute best sequence of viewpoints.
+  - **Data Ingestion**: Loads the predicted Chamfer Distances (`metadata.csv`) and the raycasted visibility data (`covered_indices.json`).
+  - **Geometric Mapping (Voronoi)**: Utilizes a Voronoi Nearest-Neighbor mapping with a fixed `DISTANCE_THRESHOLD` (e.g., 2.0mm) to cleanly isolate target features. If a `background.stl` is provided, it intelligently absorbs the rest of the object to prevent boundary bleeding. Points assigned to the background are automatically discarded from optimization.
+  - **Step 1: Baseline Confidence (The "Quality" Score)**: 
+    - The algorithm calculates a **Point-Weighted Average** for every camera based on the Chamfer Distances of the features it sees (heavily weighting the score towards features that physically dominate the view).
+    - It immediately calculates a `Filter Score = (Total Points Seen / Total Object Points) * Confidence` to filter out the worst 80% of candidates before optimization even begins, ensuring cameras must have both good accuracy *and* decent coverage to compete.
+    - Surviving candidates have their Confidence scores normalized from `0.0` to `1.0`.
+  - **Step 2: Submodular Coverability (The "Information Gain" Score)**:
+    - At every step in the GRASP sequence, the algorithm analyzes the exact point indices a candidate camera covers.
+    - It applies a **Submodular Decay Function** (`GAMMA = 0.5`) to encourage looking at new geometry:
+      - If a point has never been seen: **1.0 points**
+      - If a point was seen 1 time by previous cameras: **0.5 points**
+      - If a point was seen 2 times by previous cameras: **0.25 points**
+    - The sum of these values is divided by the total object points to create a dynamically updating `Coverability` score (0 to 1).
+  - **Step 3: MOOP Utility Score**:
+    - The algorithm selects the "Next Best View" by maximizing the combined Multi-Objective Utility function:
+      `Utility Score = (ALPHA * Coverability) + (BETA * Confidence)`
   - **Manual Evaluation**: Contains a Reverse Engineering block to compare the physical error of manually selected camera grids against the GRASP-optimized sequence.
