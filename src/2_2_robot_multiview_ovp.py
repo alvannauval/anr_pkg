@@ -108,6 +108,8 @@ def get_yolo_detection(rs_manager, model, target_class=None):
     fx = rs_manager.camera_info.K[0]
     fy = rs_manager.camera_info.K[4]
     
+    cv2.namedWindow("Detection (Press q)", cv2.WINDOW_NORMAL)
+    
     while not rospy.is_shutdown():
         color_img, depth_img = rs_manager.wait_for_frames()
         
@@ -125,17 +127,28 @@ def get_yolo_detection(rs_manager, model, target_class=None):
             px, py, _, _, rotation = box.xywhr.cpu().numpy()[0]
             
             # --- Robust Depth Calculation ---
+            # Define an offset for depth calculation (e.g., to avoid a hole in the center)
+            offset_x = 0  # Adjust this value as needed
+            offset_y = -30  # Adjust this value as needed
+            depth_px = px + offset_x
+            depth_py = py + offset_y
+            
             # Temporal filtering is handled by the ROS node natively.
-            dist = get_robust_depth(depth_img, px, py)
+            dist = get_robust_depth(depth_img, depth_px, depth_py)
             
             if dist > 0:
+                # Calculate 3D coordinates based on the original YOLO center (red dot), but use the depth from the offset point (green dot)
                 X = (px - cx) * dist / fx
                 Y = (py - cy) * dist / fy
                 Z = dist
                 cam_pts = [X, Y, Z]
                 
                 cv_frame = results[0].plot()
+                # Red circle: Original YOLO bounding box center
                 cv2.circle(cv_frame, (int(px), int(py)), 5, (0, 0, 255), -1)
+                # Green circle: Point where estimated depth is actually calculated
+                cv2.circle(cv_frame, (int(depth_px), int(depth_py)), 5, (0, 255, 0), -1)
+                
                 cv2.imshow("Detection (Press q)", cv_frame)
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord('q'):
@@ -508,7 +521,7 @@ if __name__ == "__main__":
     path = r"viewpoints_candidate"
     
     # Configuration
-    ENABLE_RECENTER = True
+    ENABLE_RECENTER = False
     TARGET_CLASS = 'Up'  # Set to None if no specific class filtering is needed
 
     # Detection & Localization
@@ -578,7 +591,7 @@ if __name__ == "__main__":
     T_base2ob_yolo = T_base2cam @ pose_to_matrix(T_cam2ob)
     T_yolo2origin = np.array([[1, 0, 0,  0],
                               [0, 1, 0,  0],
-                              [0, 0, 1,  -4.8], # -8
+                              [0, 0, 1,  -11.197], #-4.8 gatau ap # -8 #wp31 11.197
                               [0, 0, 0,  1]])
     
     np.save(os.path.join(pcd_save_dir, f"T_base2ob_yolo.npy"), T_base2ob_yolo)
@@ -662,6 +675,11 @@ def move_2():
 def move():
     # Original linear move
     for i in range(len(goal_pose_cam)):
+        user_input = input(f"\\nReady for Viewpoint {i}. Press Enter to move (or 'q' to abort): ")
+        if user_input.lower() == 'q':
+            print("Aborting sequence...")
+            break
+            
         print(f"Moving to Viewpoint {i}...")
         movel(goal_pose_cam[i], v=75, a=150) # Doosan Move command
         time.sleep(2) 
@@ -670,6 +688,7 @@ def move():
         capture_scan_view(rs_manager, T_current, i, save_dir=pcd_save_dir, duration=1.0, bbox_center=obj_base_pos)
         time.sleep(0.5)
     # Return Home
+    print("Returning Home...")
     time.sleep(1)
     home_robot()
 
@@ -708,3 +727,16 @@ def test(posx=0,posy=0,posz=0):
     movel([558.9803466796875+posx, 37.472660064697266+posy, 411.4325256347656+posz, 7.729799270629883, -179.99227905273438, 7.732522964477539], v=100, a=200)
     time.sleep(1)
     
+
+
+# ini starting point deket base
+# movel([190.85684204101562, -114.87481689453125, 465.051025390625, 177.75711059570312, -150.01075744628906, 179.9525909423828], v=40, a=80)
+
+# ini masih available (mundur 20 cm)
+# movel([170.85684204101562, -114.87481689453125, 465.051025390625, 177.75711059570312, -150.01075744628906, 179.9525909423828], v=40, a=80)
+
+# ini starting point mentok kiri
+# movel([458.34783935546875, -471.1073303222656, 591.4693603515625, 87.81663513183594, 150.02391052246094, 90.02122497558594], v=40, a=80)
+
+# ini kayaknya oke (kanan 20 cm)
+# movel([458.34783935546875, -451.1073303222656, 591.4693603515625, 87.81663513183594, 150.02391052246094, 90.02122497558594], v=40, a=80)
