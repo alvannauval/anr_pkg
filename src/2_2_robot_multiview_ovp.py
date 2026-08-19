@@ -522,10 +522,35 @@ if __name__ == "__main__":
     
     # Configuration
     ENABLE_RECENTER = False
+    
+    # Set to True to skip YOLO and manually type the object's position below
+    USE_MANUAL_DETECTION = True # False 
+    MANUAL_CAM_POS = [175.64, 135.15, 517.72] # [0.0, 0.0, 500.0]  # [X, Y, Z] in mm relative to camera
+    MANUAL_OBB_ANGLE = 1.3600000143051147 # 0.0              # Angle in degrees
+
     TARGET_CLASS = 'Up'  # Set to None if no specific class filtering is needed
 
+
+    # MANUAL_CAM_POS = [175.64, 135.15, 517.72]
+    # MANUAL_OBB_ANGLE = 1.3600000143051147
+
+    # obb_angle:  1.3600785
+
+
+
     # Detection & Localization
-    obj_cam_pos, obb_angle = get_yolo_detection(rs_manager, model, target_class=TARGET_CLASS)
+    if USE_MANUAL_DETECTION:
+        print("Bypassing YOLO: Using manual detection values...")
+        obj_cam_pos = MANUAL_CAM_POS
+        obb_angle = MANUAL_OBB_ANGLE
+    else:
+        obj_cam_pos, obb_angle = get_yolo_detection(rs_manager, model, target_class=TARGET_CLASS)
+        print(f"\n--- YOLO DETECTION RESULTS ---")
+        print(f"To reuse this detection without running YOLO again, update your config to:")
+        print(f"USE_MANUAL_DETECTION = True")
+        print(f"MANUAL_CAM_POS = {[round(c, 2) for c in obj_cam_pos]}")
+        print(f"MANUAL_OBB_ANGLE = {round(obb_angle, 2)}\n")
+
     T_init = get_tf_matrix(tf_buffer, target='base_0', source='realsense_RGBframe')
     obj_base_pos = (T_init @ np.append(obj_cam_pos, 1))[:3]
     
@@ -572,7 +597,13 @@ if __name__ == "__main__":
             time.sleep(1.0)
             
             print("Performing secondary scan after recentering...")
-            obj_cam_pos, obb_angle = get_yolo_detection(rs_manager, model, target_class=TARGET_CLASS)
+            if USE_MANUAL_DETECTION:
+                print("Bypassing secondary YOLO: Using manual detection values...")
+                obj_cam_pos = MANUAL_CAM_POS
+                obb_angle = MANUAL_OBB_ANGLE
+            else:
+                obj_cam_pos, obb_angle = get_yolo_detection(rs_manager, model, target_class=TARGET_CLASS)
+
             T_init = get_tf_matrix(tf_buffer, target='base_0', source='realsense_RGBframe')
             obj_base_pos = (T_init @ np.append(obj_cam_pos, 1))[:3]
 
