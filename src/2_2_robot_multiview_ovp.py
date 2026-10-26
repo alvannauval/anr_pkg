@@ -524,7 +524,7 @@ if __name__ == "__main__":
     ENABLE_RECENTER = False
     
     # Set to True to skip YOLO and manually type the object's position below
-    USE_MANUAL_DETECTION = True # False 
+    USE_MANUAL_DETECTION = False # False 
     MANUAL_CAM_POS = [175.64, 135.15, 517.72] # [0.0, 0.0, 500.0]  # [X, Y, Z] in mm relative to camera
     MANUAL_OBB_ANGLE = 1.3600000143051147 # 0.0              # Angle in degrees
 
@@ -622,7 +622,7 @@ if __name__ == "__main__":
     T_base2ob_yolo = T_base2cam @ pose_to_matrix(T_cam2ob)
     T_yolo2origin = np.array([[1, 0, 0,  0],
                               [0, 1, 0,  0],
-                              [0, 0, 1,  -11.197], #-4.8 gatau ap # -8 #wp31 11.197
+                              [0, 0, 1,  -25.0],  # detected depth point is on the pocket floor (15 mm below the top) -> 40 - 15 = 25 mm above CAD origin (bottom face). old: -11.197
                               [0, 0, 0,  1]])
     
     np.save(os.path.join(pcd_save_dir, f"T_base2ob_yolo.npy"), T_base2ob_yolo)
