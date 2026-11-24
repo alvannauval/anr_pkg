@@ -1,0 +1,17 @@
+{
+  "simulator_config": "simulation/real2sim/test_11_real_pocket/simulator_test-TH1041AV.json",
+  "grid": [
+    1920,
+    1080
+  ],
+  "flicker": {
+    "a_mm": 0.08,
+    "frames": 15
+  },
+  "voxel_mm": 0.5,
+  "plane_offset_mm": 2.0,
+  "crop_margin_mm": 5.0,
+  "frame": "CAD frame of T_average.npy (like processed_data)",
+  "poses": "the real views (view{i}_tf.npy, T_cad_refined)",
+  "seed": 42
+}

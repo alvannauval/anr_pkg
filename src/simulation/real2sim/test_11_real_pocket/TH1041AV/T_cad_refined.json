@@ -1,0 +1,17 @@
+{
+  "n_views": 288,
+  "table_points": 22733469,
+  "top_points": 3436693,
+  "table_tilt_deg": 2.2365072299233937,
+  "table_z_mm": -1.9924365542563052,
+  "table_patches": 561,
+  "table_flatness_mm": 0.19065001591358585,
+  "yaw_deg": -0.2397299091271195,
+  "shift_x_mm": 1.0266853932584326,
+  "shift_y_mm": -0.6477272727272727,
+  "top_fattening_mm": 3.0,
+  "top_iou_before": 0.8908375757726633,
+  "top_iou_after": 0.9133493003907727,
+  "cad_move_mean_mm": 2.170948325585374,
+  "cad_move_max_mm": 3.4836675379658453
+}

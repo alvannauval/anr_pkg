@@ -1,0 +1,21 @@
+{
+  "model_path": "simulation/real2sim/test_11_real_pocket/model_10in_test-TH1041AV.pt",
+  "depth_noise": {
+    "blur_px": 5.5,
+    "fine_share": 0.175,
+    "fine_px": 1.25
+  },
+  "drop_noise": {
+    "blur_px": 5.0,
+    "fine_share": 0.0,
+    "fine_px": 0.0
+  },
+  "sigma_scale": 1.0504341125488281,
+  "round_mm": true,
+  "grid": [
+    960,
+    540
+  ],
+  "calibration_views": 30,
+  "seed": 42
+}
